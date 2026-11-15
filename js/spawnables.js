@@ -23,7 +23,7 @@ export const SPAWNABLES = [
   { id: 'barrel', name: 'Barrel', category: 'Props', glb: 'models/barrel.glb', scale: 0.03, shape: 'box', size: [0.3, 0.45, 0.3], mass: 25, color: 0x3f6fb0 },
   { id: 'table', name: 'Table', category: 'Props', glb: 'models/table.glb', scale: 0.3, shape: 'box', size: [0.7, 0.4, 0.45], mass: 20, color: 0x8b5a2b },
   { id: 'chair', name: 'Chair', category: 'Props', glb: 'models/chair.glb', scale: 0.13, shape: 'box', size: [0.25, 0.45, 0.25], mass: 6, color: 0x7a4e24 },
-  { id: 'cone', name: 'Traffic Cone', category: 'Props', glb: 'models/traffic_cone.glb', scale: 0.03, shape: 'box', size: [0.17, 0.35, 0.17], mass: 2, color: 0xff7a1a },
+  { id: 'cone', name: 'Traffic Cone', category: 'Props', glb: 'models/traffic_cone.glb', scale: 0.04, shape: 'box', size: [0.17, 0.65, 0.17], mass: 2, color: 0xff7a1a },
 
   // ---- physics objects ----
   { id: 'ball', name: 'Ball', category: 'Physics Objects', glb: 'models/ball.glb', scale: 0.4, shape: 'sphere', size: [0.35], mass: 3, color: 0xe04040, bouncy: true },
@@ -31,7 +31,7 @@ export const SPAWNABLES = [
   { id: 'heavy_cube', name: 'Heavy Cube', category: 'Physics Objects', glb: 'models/crate.glb', scale: 1.5, shape: 'box', size: [0.75, 0.75, 0.75], mass: 400, color: 0x555555 },
 
   // ---- explosives ----
-  { id: 'explosive_barrel', name: 'Explosive Barrel', category: 'Explosives', glb: 'models/explosive_barrel.glb', scale: 0.2, shape: 'box', size: [0.3, 0.45, 0.3], mass: 25, color: 0xcc2b2b, explosive: { radius: 10, force: 20, damage: 80, impact: 12 } },
+  { id: 'explosive_barrel', name: 'Explosive Barrel', category: 'Explosives', glb: 'models/explosive_barrel.glb', scale: 0.4, shape: 'box', size: [0.3, 0.7, 0.3], mass: 25, color: 0xcc2b2b, explosive: { radius: 10, force: 20, damage: 80, impact: 12 } },
   { id: 'mega_barrel', name: 'Mega Barrel', category: 'Explosives', glb: 'models/explosive_barrel.glb', scale: 0.6, shape: 'box', size: [0.6, 0.9, 0.6], mass: 80, color: 0x991010, explosive: { radius: 24, force: 34, damage: 140, impact: 12 } },
   { id: 'timed_bomb', name: 'Timed Bomb (4s)', category: 'Explosives', glb: 'models/bomb.glb', scale: 1, shape: 'sphere', size: [0.3], mass: 8, color: 0x222222, explosive: { radius: 12, force: 24, damage: 90, fuse: 4 } },
   { id: 'grenade', name: 'Impact Grenade', category: 'Explosives', glb: 'models/grenade.glb', scale: 1, shape: 'sphere', size: [0.12], mass: 1, color: 0x4a6b2a, explosive: { radius: 6, force: 14, damage: 60, impact: 6 } },

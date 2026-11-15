@@ -10,12 +10,12 @@ import { cloneModel } from './assets.js';
 export const ITEMS = {
   crowbar: {
     name: 'Crowbar', glb: 'models/crowbar.glb', length: 0.75, modelRot: [0, 0, 0], color: 0xc0392b,
-    fp: { pos: [0.32, -0.3, -0.55], rot: [-1.0, 0.25, 0.45] }, hand: { pos: [0, 0.05, 0], rot: [0, 0, 180] },
+    fp: { pos: [0.32, -0.3, -0.55], rot: [-1.0, 0.25, 0.45] }, hand: { pos: [0, 0.05, 0], rot: [180, 0, 0] },
     hint: 'LMB: swing (damages players, knocks props, sets off explosives)',
   },
   physgun: {
     name: 'Physics Gun', glb: 'models/physgun.glb', length: 0.55, modelRot: [0, 0, 0], color: 0xd0d4da,
-    fp: { pos: [0.24, -0.22, -0.5], rot: [-Math.PI / 2, 0, 0] }, hand: { pos: [0, 0.05, 0.03], rot: [90, 0, 0] },
+    fp: { pos: [0.24, -0.22, -0.5], rot: [-Math.PI / 2, 0, 0] }, hand: { pos: [0, 0.05, 0.03], rot: [0, 0, 90] },
     hint: 'hold LMB: grab a prop - scroll while holding: distance',
   },
   glue: {

@@ -1,6 +1,7 @@
 // ui.js - menus, spawn menu, hud, pause, settings. plain dom, real buttons.
 import { MAPS, drawPreview } from './maps.js';
 import { SPAWNABLES, CATEGORIES } from './spawnables.js';
+import { ITEMS } from './items.js';
 import { KEYS } from './config.js';
 import * as audio from './audio.js';
 
@@ -11,22 +12,20 @@ const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } ca
 
 export const settings = { sens: 1, volume: 0.7, fov: 75, ...(read(SETTINGS_KEY) || {}) };
 
-let h = {}, intent = 'sp', activeCat = CATEGORIES[0], helpTimer = 0, settingsReturn = null;
+let h = {}, intent = 'sp', activeCat = CATEGORIES[0], helpTimer = 0, settingsReturn = null, lastPrompt = null;
 
 const keyLabel = c => c.startsWith('Key') ? c.slice(3) : c.startsWith('Shift') ? 'Shift' : c;
-const labels = a => [...new Set(KEYS[a].map(keyLabel))].join(' / ');
+export const keyLabels = a => [...new Set(KEYS[a].map(keyLabel))].join(' / ');
 export const playerName = () => ($('player-name').value.trim() || 'player').slice(0, 16);
 
 export function init(handlers) {
   h = handlers;
 
-  // generic click sound + audio unlock
   document.addEventListener('click', e => { if (e.target.closest('button')) { audio.unlock(); audio.play('click'); } });
 
   $('player-name').value = read(NAME_KEY) || '';
   $('player-name').addEventListener('change', () => write(NAME_KEY, $('player-name').value.trim()));
 
-  // title / multiplayer / maps
   $('btn-sp').addEventListener('click', () => { intent = 'sp'; openMaps(); });
   $('btn-mp').addEventListener('click', () => { setStatus('mp-status', ''); showScreen('mp'); });
   $('btn-mp-back').addEventListener('click', () => showScreen('title'));
@@ -45,7 +44,6 @@ export function init(handlers) {
     lockButtons(false);
   });
 
-  // pause + settings
   $('btn-resume').addEventListener('click', () => h.onResume());
   $('btn-settings').addEventListener('click', () => openSettings($('btn-settings')));
   $('btn-exit').addEventListener('click', () => h.onExit());
@@ -55,7 +53,6 @@ export function init(handlers) {
     $(id).addEventListener('input', () => { settings[key] = Number($(id).value); write(SETTINGS_KEY, settings); h.onSettings?.(); });
   }
 
-  // in-game
   $('lockhint').addEventListener('click', () => h.onLockClick());
   $('clear-all').addEventListener('click', () => h.onClearAll());
   buildSpawnMenu();
@@ -70,7 +67,7 @@ export function showScreen(name) {
   if (name !== 'none') $('screen-' + name).querySelector('button, input')?.focus();
 }
 export function showTitle(notice) {
-  $('hud').hidden = true; $('pause').hidden = true; $('settings').hidden = true; $('spawnmenu').hidden = true;
+  hideGameUI();
   $('notice').hidden = !notice; $('notice').textContent = notice || '';
   showScreen('title');
 }
@@ -108,16 +105,18 @@ function openMaps() {
 
 // ---- hud
 export function showHUD(on) { $('hud').hidden = !on; if (on) { showScreen('none'); showHelp(true); clearTimeout(helpTimer); helpTimer = setTimeout(() => showHelp(false), 9000); } }
-export function hideGameUI() { $('hud').hidden = true; $('pause').hidden = true; $('settings').hidden = true; $('spawnmenu').hidden = true; }
+export function hideGameUI() { for (const id of ['hud', 'pause', 'settings', 'spawnmenu']) $(id).hidden = true; }
 export function setHP(hp, max) {
   $('hp-fill').style.width = (100 * hp / max) + '%';
-  $('hp-fill').style.background = hp < max * 0.3 ? 'var(--danger)' : 'var(--ok)';
+  $('hp').classList.toggle('low', hp < max * 0.3);
   $('hp-text').textContent = Math.ceil(hp);
   $('hp').setAttribute('aria-valuenow', Math.ceil(hp));
 }
+export function flashHurt() { const el = $('hurt'); el.classList.remove('flash'); void el.offsetWidth; el.classList.add('flash'); }
 export function setPlayers(n) { $('players').textContent = `players: ${n}`; }
 export function setRoom(code) { $('room').textContent = code ? `room: ${code}` : ''; }
 export function setDeath(text) { $('death').hidden = !text; $('death').textContent = text || ''; }
+export function setPrompt(text) { if (text === lastPrompt) return; lastPrompt = text; $('prompt').hidden = !text; $('prompt').textContent = text || ''; }
 export function showLockHint(on) { $('lockhint').hidden = !on; }
 export function showHelp(on) { $('help').hidden = !on; }
 export function toggleHelp() { clearTimeout(helpTimer); showHelp($('help').hidden); }
@@ -125,16 +124,30 @@ export function toast(msg) {
   const d = document.createElement('div'); d.textContent = msg; $('toasts').append(d);
   setTimeout(() => d.remove(), 3500);
 }
+export function setHotbar(list, sel) {
+  const bar = $('hotbar');
+  bar.hidden = list.length <= 1;
+  bar.textContent = '';
+  list.forEach((id, i) => {
+    const d = document.createElement('div'); d.className = 'slot' + (i === sel ? ' sel' : '');
+    const n = document.createElement('b'); n.textContent = i;
+    const t = document.createElement('span'); t.textContent = id ? ITEMS[id].name : 'hands';
+    d.append(n, t); bar.append(d);
+  });
+  $('item-hint').textContent = list[sel] ? ITEMS[list[sel]].hint : '';
+}
 
 function buildHelp() {
   const rows = [
-    ['move', 'W A S D'], ['jump', labels('jump')], ['sprint (forward only)', labels('sprint') + ' + W'],
-    ['spawn menu (hold)', labels('spawnMenu')], ['remove aimed prop', labels('remove')], ['undo last spawn', labels('undo')],
-    ['detonate aimed explosive', labels('detonate')], ['clear all props', labels('clearAll')], ['this help', labels('help')], ['pause', 'Esc'],
+    ['move', 'W A S D'], ['jump', keyLabels('jump')], ['sprint (forward only)', keyLabels('sprint') + ' + W'],
+    ['spawn menu (hold)', keyLabels('spawnMenu')],
+    ['use: pick up / sit / thruster', keyLabels('use')], ['use held item', 'left click'], ['glue: cancel / unglue', 'right click'], ['switch items', 'scroll wheel'],
+    ['remove aimed prop', keyLabels('remove')], ['undo last spawn', keyLabels('undo')],
+    ['detonate aimed explosive', keyLabels('detonate')], ['clear all props', keyLabels('clearAll')], ['this help', keyLabels('help')], ['pause', 'Esc'],
   ];
   const dl = $('help-list');
   for (const [k, v] of rows) { const dt = document.createElement('dt'); dt.textContent = v; const dd = document.createElement('dd'); dd.textContent = k; dl.append(dt, dd); }
-  $('spawn-hint').textContent = `click an item to spawn it at the crosshair - ${labels('remove')} remove - ${labels('undo')} undo - ${labels('detonate')} detonate`;
+  $('spawn-hint').textContent = `click an item to spawn it at the crosshair - ${keyLabels('remove')} remove - ${keyLabels('undo')} undo - ${keyLabels('detonate')} detonate - ${keyLabels('use')} on an item picks it up`;
 }
 
 // ---- spawn menu
@@ -152,15 +165,15 @@ function selectCat(c) {
   activeCat = c;
   for (const b of $('cats').children) b.setAttribute('aria-selected', String(b.dataset.cat === c));
   const box = $('items'); box.textContent = '';
-  for (const s of SPAWNABLES.filter(x => x.category === c)) {
+  SPAWNABLES.filter(x => x.category === c).forEach((s, i) => {
     const b = document.createElement('button');
-    b.type = 'button'; b.className = 'item';
+    b.type = 'button'; b.className = 'item'; b.style.animationDelay = (i * 25) + 'ms';
     const sw = document.createElement('i'); sw.style.background = '#' + s.color.toString(16).padStart(6, '0');
     const n = document.createElement('span'); n.textContent = s.name;
     b.append(sw, n);
     b.addEventListener('click', () => h.onSpawnItem(s.id));
     box.append(b);
-  }
+  });
 }
 export function openSpawn() { $('spawnmenu').hidden = false; }
 export function closeSpawn() { $('spawnmenu').hidden = true; }

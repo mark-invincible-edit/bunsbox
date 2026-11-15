@@ -28,7 +28,7 @@ export const SPAWNABLES = [
   // ---- physics objects ----
   { id: 'ball', name: 'Ball', category: 'Physics Objects', glb: 'models/ball.glb', scale: 0.4, shape: 'sphere', size: [0.35], mass: 3, color: 0xe04040, bouncy: true },
   { id: 'big_ball', name: 'Big Ball', category: 'Physics Objects', glb: 'models/ball.glb', scale: 1, shape: 'sphere', size: [1.05], mass: 30, color: 0x40a0e0, bouncy: true },
-  { id: 'heavy_cube', name: 'Heavy Cube', category: 'Physics Objects', glb: 'models/crate.glb', scale: 1.5, shape: 'box', size: [0.75, 0.75, 0.75], mass: 400, color: 0x555555 },
+  { id: 'heavy_cube', name: 'Heavy Cube', category: 'Physics Objects', glb: 'models/crate.glb', scale: 0.02, shape: 'box', size: [0.75, 0.75, 0.75], mass: 400, color: 0x555555 },
 
   // ---- explosives ----
   { id: 'explosive_barrel', name: 'Explosive Barrel', category: 'Explosives', glb: 'models/explosive_barrel.glb', scale: 0.4, shape: 'box', size: [0.3, 0.7, 0.3], mass: 25, color: 0xcc2b2b, explosive: { radius: 10, force: 20, damage: 80, impact: 12 } },

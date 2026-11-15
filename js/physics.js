@@ -5,19 +5,24 @@ import * as CANNON from 'cannon-es';
 import { PLAYER, GROUPS, LIMITS } from './config.js';
 import { getSpawnable } from './spawnables.js';
 import { cloneModel, makePlaceholder } from './assets.js';
+import { buildItemModel } from './items.js';
 import { SnapshotBuffer } from './interp.js';
 
 const r3 = v => Math.round(v * 1000) / 1000;
+const UP = new THREE.Vector3(0, 1, 0);
 
 export class Physics {
   constructor(group, isAuthority) {
     this.group = group;
     this.isAuthority = isAuthority;
-    this.hooks = {};            // onSpawn(prop) onRemove(id) onClear() onExplosion(pos, ex)
+    this.hooks = {};            // onSpawn(prop) onRemove(id) onClear() onExplosion(pos, ex) onThruster(id, on)
     this.props = new Map();
     this.remote = new Map();    // host only: kinematic bodies for remote players so they can push props
     this.timers = [];           // {t, id} fuses + chain reactions
+    this.grabs = new Map();     // physgun: owner id -> {id, target:[x,y,z]}
+    this.glues = [];            // {a, b, c}
     this.nextId = 1;
+    this._v = new CANNON.Vec3();
 
     const w = (this.world = new CANNON.World({ gravity: new CANNON.Vec3(0, PLAYER.GRAVITY, 0) }));
     w.allowSleep = true;
@@ -96,17 +101,40 @@ export class Physics {
   // ---- props ----
   _visual(spec) {
     const holder = new THREE.Group();
-    const inst = spec.glb ? cloneModel(spec.glb) : null;
-    if (inst) {
-      const o = inst.object;
-      o.scale.multiplyScalar(spec.scale ?? 1);
-      holder.add(o);
-      holder.updateMatrixWorld(true);
-      const c = new THREE.Box3().setFromObject(holder).getCenter(new THREE.Vector3());
-      o.position.sub(c);                      // center the model on the physics body
-      o.traverse(m => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+    if (spec.item) {                                   // inventory items: auto-fitted model (or procedural), lying flat
+      const m = buildItemModel(spec.item);
+      m.rotation.z = Math.PI / 2;
+      holder.add(m);
     } else {
-      holder.add(makePlaceholder({ shape: spec.shape, size: spec.size, color: spec.color, label: spec.name }));
+      const inst = spec.glb ? cloneModel(spec.glb) : null;
+      if (inst) {
+        const o = inst.object;
+        o.scale.multiplyScalar(spec.scale ?? 1);
+        holder.add(o);
+        holder.updateMatrixWorld(true);
+        const c = new THREE.Box3().setFromObject(holder).getCenter(new THREE.Vector3());
+        o.position.sub(c);                             // center the model on the physics body
+        o.traverse(m => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+      } else {
+        holder.add(makePlaceholder({ shape: spec.shape, size: spec.size, color: spec.color, label: spec.name }));
+      }
+      if (spec.thruster) {
+        const dir = new THREE.Vector3(...spec.thruster.dir).normalize();
+        const ext = Math.abs(dir.x) * spec.size[0] + Math.abs(dir.y) * spec.size[1] + Math.abs(dir.z || 0) * (spec.size[2] ?? 0);
+        if (!inst) {                                   // arrow so you can see which way a placeholder pushes
+          const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 12), new THREE.MeshBasicMaterial({ color: 0x4de1ff }));
+          arrow.quaternion.setFromUnitVectors(UP, dir);
+          arrow.position.copy(dir).multiplyScalar(ext + 0.11);
+          holder.add(arrow);
+        }
+        const flame = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.7, 10),
+          new THREE.MeshBasicMaterial({ color: 0xff9a2e, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
+        flame.quaternion.setFromUnitVectors(UP, dir.clone().negate());   // apex points away from the nozzle
+        flame.position.copy(dir).multiplyScalar(-(ext + 0.35));
+        flame.visible = false;
+        holder.add(flame);
+        holder.userData.flame = flame;
+      }
     }
     return holder;
   }
@@ -138,7 +166,8 @@ export class Physics {
     this.group.add(mesh);
     this.world.addBody(body);
 
-    const prop = { id, key, spec, body, mesh, owner: opts.owner ?? 0, buf: new SnapshotBuffer(), sentSleep: false, chained: false };
+    const prop = { id, key, spec, body, mesh, owner: opts.owner ?? 0, buf: new SnapshotBuffer(), sentSleep: false, chained: false,
+      active: false, flame: mesh.userData.flame || null };
     this.props.set(id, prop);
 
     if (this.isAuthority && spec.explosive) {
@@ -156,6 +185,8 @@ export class Physics {
   removeProp(id, silent = false) {
     const p = this.props.get(id);
     if (!p) return false;
+    this.unglue(id);
+    for (const [o, g] of [...this.grabs]) if (g.id === id) this.grabs.delete(o);
     this.world.removeBody(p.body);
     this.group.remove(p.mesh);
     this.props.delete(id);
@@ -163,9 +194,52 @@ export class Physics {
     return true;
   }
   clearProps() {
+    for (const g of this.glues) this.world.removeConstraint(g.c);
+    this.glues = []; this.grabs.clear();
     for (const id of [...this.props.keys()]) this.removeProp(id, true);
     this.timers.length = 0;
     this.hooks.onClear?.();
+  }
+
+  // ---- interactions (authority only) ----
+  knockProp(id, d, mag) {
+    const p = this.props.get(id);
+    if (!this.isAuthority || !p) return;
+    const l = Math.hypot(d.x, d.y, d.z) || 1, dv = Math.min(14, mag / p.spec.mass);
+    p.body.wakeUp();
+    p.body.velocity.x += d.x / l * dv; p.body.velocity.y += d.y / l * dv + dv * 0.15; p.body.velocity.z += d.z / l * dv;
+    p.body.angularVelocity.set((Math.random() - 0.5) * dv * 0.4, (Math.random() - 0.5) * dv * 0.4, (Math.random() - 0.5) * dv * 0.4);
+  }
+
+  toggleThruster(id) {
+    const p = this.props.get(id);
+    if (!p || !p.spec.thruster) return;
+    p.active = !p.active;
+    this.hooks.onThruster?.(id, p.active);
+  }
+  setThruster(id, on) { const p = this.props.get(id); if (p) p.active = on; }     // clients: visual only
+
+  startGrab(owner, id) { const p = this.props.get(id); if (this.isAuthority && p) this.grabs.set(owner, { id, target: [p.body.position.x, p.body.position.y, p.body.position.z] }); }
+  setGrabTarget(owner, t) { const g = this.grabs.get(owner); if (g) g.target = t; }
+  endGrab(owner) { this.grabs.delete(owner); }
+
+  glue(a, b) {
+    if (!this.isAuthority || a === b) return false;
+    const pa = this.props.get(a), pb = this.props.get(b);
+    if (!pa || !pb) return false;
+    if (this.glues.some(g => (g.a === a && g.b === b) || (g.a === b && g.b === a))) return false;
+    const c = new CANNON.LockConstraint(pa.body, pb.body, { collideConnected: false });
+    this.world.addConstraint(c);
+    this.glues.push({ a, b, c });
+    pa.body.wakeUp(); pb.body.wakeUp();
+    return true;
+  }
+  unglue(id) {
+    const keep = [];
+    for (const g of this.glues) { if (g.a === id || g.b === id) this.world.removeConstraint(g.c); else keep.push(g); }
+    const changed = keep.length !== this.glues.length;
+    this.glues = keep;
+    return changed;
   }
 
   // ---- explosions (authority only) ----
@@ -195,8 +269,48 @@ export class Physics {
   }
 
   // ---- stepping ----
+  _preStep() {
+    const V = this._v;
+    for (const [owner, g] of [...this.grabs]) {            // physgun: spring the prop to the target point
+      const p = this.props.get(g.id);
+      if (!p) { this.grabs.delete(owner); continue; }
+      const b = p.body;
+      b.wakeUp();
+      let vx = (g.target[0] - b.position.x) * 14, vy = (g.target[1] - b.position.y) * 14, vz = (g.target[2] - b.position.z) * 14;
+      const l = Math.hypot(vx, vy, vz);
+      if (l > 30) { vx *= 30 / l; vy *= 30 / l; vz *= 30 / l; }
+      b.velocity.set(vx, vy, vz);
+      b.angularVelocity.scale(0.85, b.angularVelocity);
+    }
+    for (const p of this.props.values()) {                 // thrusters push along their facing
+      if (!p.active || !p.spec.thruster) continue;
+      const t = p.spec.thruster;
+      V.set(t.dir[0], t.dir[1], t.dir[2]);
+      p.body.quaternion.vmult(V, V);
+      V.scale(t.thrust, V);
+      p.body.wakeUp();
+      p.body.applyForce(V);
+    }
+    for (const g of this.glues) {                          // never let half a glued pair fall asleep
+      const a = this.props.get(g.a)?.body, b = this.props.get(g.b)?.body;
+      if (!a || !b) continue;
+      if (a.sleepState === CANNON.Body.SLEEPING && b.sleepState !== CANNON.Body.SLEEPING) a.wakeUp();
+      else if (b.sleepState === CANNON.Body.SLEEPING && a.sleepState !== CANNON.Body.SLEEPING) b.wakeUp();
+    }
+  }
+
+  _flames() {
+    for (const p of this.props.values()) {
+      if (!p.flame) continue;
+      p.flame.visible = p.active;
+      if (p.active) p.flame.scale.set(0.85 + Math.random() * 0.3, 0.8 + Math.random() * 0.6, 0.85 + Math.random() * 0.3);
+    }
+  }
+
   step(dt) {
+    if (this.isAuthority) this._preStep();
     this.world.step(1 / 60, dt, 3);
+    this._flames();
     if (!this.isAuthority) return;
     for (const t of this.timers) t.t -= dt;
     const due = this.timers.filter(t => t.t <= 0);

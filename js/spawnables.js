@@ -29,8 +29,8 @@ export const SPAWNABLES = [
   { id: 'table', name: 'Table', category: 'Props', glb: 'models/table.glb', scale: 0.3, shape: 'box', size: [0.7, 0.4, 0.45], mass: 20, color: 0x8b5a2b },
   { id: 'chair', name: 'Chair', category: 'Props', glb: 'models/chair.glb', scale: 0.13, shape: 'box', size: [0.25, 0.45, 0.25], mass: 6, color: 0x7a4e24, seat: true },
   { id: 'cone', name: 'Traffic Cone', category: 'Props', glb: 'models/traffic_cone.glb', scale: 0.04, shape: 'box', size: [0.17, 0.65, 0.17], mass: 2, color: 0xff7a1a },
-  { id: 'thruster', name: 'Thruster (forward)', category: 'Props', glb: 'models/thruster.glb', scale: 1, shape: 'box', size: [0.2, 0.2, 0.3], mass: 5, color: 0x4a90d9, thruster: { thrust: 900, dir: [0, 0, -1] } },
-  { id: 'thruster_up', name: 'Thruster (up)', category: 'Props', glb: 'models/thruster.glb', scale: 1, shape: 'box', size: [0.2, 0.2, 0.3], mass: 5, color: 0x4a90d9, thruster: { thrust: 900, dir: [0, 1, 0] } },
+  { id: 'thruster', name: 'Thruster (forward)', category: 'Props', glb: 'models/thruster.glb', scale: 0.1, shape: 'box', size: [0.2, 0.2, 0.3], mass: 5, color: 0x4a90d9, thruster: { thrust: 900, dir: [0, 0, -1] } },
+  { id: 'thruster_up', name: 'Thruster (up)', category: 'Props', glb: 'models/thruster.glb', scale: 0.1, shape: 'box', size: [0.2, 0.2, 0.3], mass: 5, color: 0x4a90d9, thruster: { thrust: 900, dir: [0, 1, 0] } },
 
   // ---- physics objects ----
   { id: 'ball', name: 'Ball', category: 'Physics Objects', glb: 'models/ball.glb', scale: 0.4, shape: 'sphere', size: [0.35], mass: 3, color: 0xe04040, bouncy: true },

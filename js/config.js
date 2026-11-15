@@ -6,6 +6,7 @@ export const KEYS = {
   jump: ['Space'],
   sprint: ['ShiftLeft', 'ShiftRight'],
   spawnMenu: ['KeyQ'],          // <- change the spawn menu key here
+  use: ['KeyE'],                // pick up items, sit in chairs, toggle thrusters
   remove: ['KeyX'],             // remove the prop you are aiming at
   undo: ['KeyZ'],               // remove your last spawned prop
   detonate: ['KeyF'],           // detonate the explosive you are aiming at
@@ -24,6 +25,16 @@ export const PLAYER = {
   FALL_DMG: 7,        // damage per m/s above the safe speed
   MODEL_YAW_OFFSET: Math.PI,   // if remote players face backwards, set this to 0
   STRIP_ROOT_MOTION: true,     // drops hips position tracks so mixamo clips do not drift
+  DEAD_Y_OFFSET: -0.8,         // how far the model sinks while the dead animation plays (tweak me)
+  SIT_DROP: 0.4,               // how far the model/camera drop when sitting in a chair
+};
+
+// item + interaction tuning
+export const ITEMS_CFG = {
+  USE_REACH: 4,                // meters for the E key
+  GLUE_REACH: 15,
+  CROWBAR: { DAMAGE: 25, REACH: 3, COOLDOWN: 0.45, KNOCK: 160 },   // knock = impulse, speed gained = knock / mass (capped)
+  PHYSGUN: { REACH: 25, MIN_DIST: 1.5, MAX_DIST: 25 },
 };
 
 export const NET = {
@@ -55,11 +66,13 @@ export const ANIMS = {
   jump: 'Jumping',
   fall: 'Falling Idle (1)',
   knockback: 'Falling',
+  sit: 'Falling Idle (1)',      // no sit clip yet: swap this name when you get one
   dead: 'deaaaaaaaad',
 };
 export const ONE_SHOT = ['jump', 'dead'];   // play once and hold the last frame
 
 export const PLAYER_MODEL = 'plr.glb';
+export const EXPLOSION_IMAGES = ['explosion.png', 'explosion.webp', 'explosion.jpg', 'explosion.gif'];   // first one found in /assets wins
 export const TEXTURE_FILES = [
   'concreteground.png', 'concretewall.png', 'grassground.png', 'metalplates.png',
   'rockyground.png', 'rustymetal.png', 'woodplanks.png',
@@ -67,4 +80,5 @@ export const TEXTURE_FILES = [
 export const SOUND_NAMES = [
   'footstep_grass', 'footstep_concrete', 'footstep_metal', 'footstep_rock', 'footstep_wood',
   'jump', 'land', 'spawn', 'explosion', 'click', 'wind',
+  'swing', 'hit', 'pickup', 'glue', 'thruster',
 ];

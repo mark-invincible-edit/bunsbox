@@ -33,8 +33,8 @@ export const SPAWNABLES = [
   // ---- explosives ----
   { id: 'explosive_barrel', name: 'Explosive Barrel', category: 'Explosives', glb: 'models/explosive_barrel.glb', scale: 0.4, shape: 'box', size: [0.3, 0.7, 0.3], mass: 25, color: 0xcc2b2b, explosive: { radius: 10, force: 20, damage: 80, impact: 12 } },
   { id: 'mega_barrel', name: 'Mega Barrel', category: 'Explosives', glb: 'models/explosive_barrel.glb', scale: 0.6, shape: 'box', size: [0.6, 0.9, 0.6], mass: 80, color: 0x991010, explosive: { radius: 24, force: 34, damage: 140, impact: 12 } },
-  { id: 'timed_bomb', name: 'Timed Bomb (4s)', category: 'Explosives', glb: 'models/bomb.glb', scale: 1, shape: 'sphere', size: [0.3], mass: 8, color: 0x222222, explosive: { radius: 12, force: 24, damage: 90, fuse: 4 } },
-  { id: 'grenade', name: 'Impact Grenade', category: 'Explosives', glb: 'models/grenade.glb', scale: 1, shape: 'sphere', size: [0.12], mass: 1, color: 0x4a6b2a, explosive: { radius: 6, force: 14, damage: 60, impact: 6 } },
+  { id: 'timed_bomb', name: 'Timed Bomb (4s)', category: 'Explosives', glb: 'models/bomb.glb', scale: 3, shape: 'sphere', size: [0.3], mass: 8, color: 0x222222, explosive: { radius: 12, force: 24, damage: 90, fuse: 4 } },
+  { id: 'grenade', name: 'Impact Grenade', category: 'Explosives', glb: 'models/grenade.glb', scale: 0.6, shape: 'sphere', size: [0.12], mass: 1, color: 0x4a6b2a, explosive: { radius: 6, force: 14, damage: 60, impact: 6 } },
 
   // ---- animals / npcs (physics props, no ai) ----
   { id: 'pigeon', name: 'Pigeon', category: 'Animals/NPCs', glb: 'models/pigeon.glb', scale: 1, shape: 'box', size: [0.18, 0.14, 0.28], mass: 1, color: 0x9aa3ad },

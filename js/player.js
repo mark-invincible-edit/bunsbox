@@ -1,40 +1,47 @@
 // player.js - local first-person controller + the animated avatar used for remote players.
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
-import { KEYS, keyHeld, PLAYER, ANIMS, ONE_SHOT, PLAYER_MODEL } from './config.js';
+import { keyHeld, PLAYER, ANIMS, ONE_SHOT, PLAYER_MODEL, GROUPS } from './config.js';
 import { cloneModel, makePlaceholder, makeLabel } from './assets.js';
+import { ITEMS, buildItemModel } from './items.js';
 import * as audio from './audio.js';
 
 // ---------------------------------------------------------------- avatar
 export class Avatar {
   constructor(name) {
     this.group = new THREE.Group();     // origin = feet
-    this.state = '';
-    this.cur = null;
-    this.mixer = null;
-    this.actions = Object.create(null);
+    this.holder = new THREE.Group();    // everything visible except the name tag (so we can sink it when dead/sitting)
+    this.group.add(this.holder);
+    this.state = ''; this.cur = null; this.mixer = null; this.actions = Object.create(null);
+    this.hand = null; this.held = null; this.heldId = null; this.yOff = 0;
     const inst = cloneModel(PLAYER_MODEL);
     if (inst) this._init(inst);
     else {
       const ph = makePlaceholder({ shape: 'box', size: [0.3, 0.9, 0.2], color: 0x3b82f6 });
       ph.position.y = 0.9;
-      this.group.add(ph);
+      this.holder.add(ph);
     }
     this.setName(name);
     this.setState('idle');
   }
 
   _init(inst) {
-    const model = inst.object, holder = new THREE.Group();
-    holder.add(model);
-    holder.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(holder);
+    const model = inst.object, fit = new THREE.Group();
+    fit.add(model);
+    fit.updateMatrixWorld(true);
+    const box = new THREE.Box3().setFromObject(fit);
     model.scale.setScalar(PLAYER.HEIGHT / ((box.max.y - box.min.y) || 1));   // fit to player height
-    holder.updateMatrixWorld(true);
-    box.setFromObject(holder);
+    fit.updateMatrixWorld(true);
+    box.setFromObject(fit);
     model.position.set(-(box.min.x + box.max.x) / 2, -box.min.y, -(box.min.z + box.max.z) / 2);   // feet on origin
     model.traverse(o => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
-    this.group.add(holder);
+    this.holder.add(fit);
+
+    // right hand bone for held items (mixamo name first, then any bone that looks like a right hand)
+    let hand = model.getObjectByName('mixamorigRightHand');
+    if (!hand) model.traverse(o => { if (!hand && o.isBone && /right.?hand$/i.test(o.name)) hand = o; });
+    this.hand = hand || null;
+    if (!hand) console.warn('[anim] no right hand bone found, held items float next to the body');
 
     this.mixer = new THREE.AnimationMixer(model);
     const find = n => THREE.AnimationClip.findByName(inst.clips, n) || inst.clips.find(c => c.name.trim().toLowerCase() === n.toLowerCase());
@@ -52,7 +59,6 @@ export class Avatar {
   setName(name) {
     if (this.tag) { this.group.remove(this.tag); this.tag.material.map.dispose(); this.tag.material.dispose(); }
     this.tag = makeLabel(name || 'player');
-    this.tag.position.y = PLAYER.HEIGHT + 0.4;
     this.group.add(this.tag);
   }
 
@@ -67,11 +73,41 @@ export class Avatar {
     this.cur = a;
   }
 
-  update(dt) { this.mixer?.update(dt); }
+  // put an item in the hand bone (or float it next to the body if the rig has no hand bone)
+  holdItem(id) {
+    id = id && ITEMS[id] ? id : null;
+    if (id === this.heldId) return;
+    if (this.held) this.held.parent?.remove(this.held);
+    this.held = null; this.heldId = id;
+    if (!id) return;
+    const def = ITEMS[id], m = buildItemModel(id), parent = this.hand || this.group;
+    m.traverse(o => { if (o.isMesh) o.frustumCulled = false; });
+    if (this.hand) {
+      parent.updateWorldMatrix(true, false);
+      const ws = new THREE.Vector3(); parent.getWorldScale(ws);
+      const k = 1 / (ws.x || 1);                       // cancel the bone's inherited scale so the item keeps real-world size
+      m.scale.setScalar(k);
+      m.position.set(...def.hand.pos).multiplyScalar(k);
+    } else m.position.set(0.3, 1.0, 0.2);
+    m.rotation.set(...def.hand.rot);
+    parent.add(m);
+    this.held = m;
+  }
+  itemTip(out) { const t = this.held?.userData.tip; return t ? t.getWorldPosition(out) : null; }
+
+  update(dt) {
+    this.mixer?.update(dt);
+    // dead = sink into the ground, sitting = drop onto the seat
+    const target = this.state === 'dead' ? PLAYER.DEAD_Y_OFFSET : this.state === 'sit' ? -PLAYER.SIT_DROP : 0;
+    this.yOff += (target - this.yOff) * (1 - Math.exp(-8 * dt));
+    this.holder.position.y = this.yOff;
+    this.tag.position.y = PLAYER.HEIGHT + 0.4 + Math.min(0, this.yOff);
+  }
   dispose() { this.mixer?.stopAllAction(); this.group.parent?.remove(this.group); }
 }
 
 // ---------------------------------------------------------------- local player
+const _v = new THREE.Vector3();
 export class LocalPlayer {
   constructor(physics, camera) {
     this.physics = physics; this.camera = camera;
@@ -82,11 +118,13 @@ export class LocalPlayer {
     this.knockback = false; this.knockTime = 0;
     this.state = 'idle'; this.surface = 'concrete'; this.stepTimer = 0;
     this.eye = PLAYER.EYE; this.roll = 0;
-    this.onRespawn = null;
+    this.seat = null;                   // {prop, t} while sitting
+    this.onRespawn = null; this.onHurt = null; this.onDeath = null;
   }
 
   spawn(pt) {
     const b = this.body;
+    this.unseat(true);
     b.position.set(pt[0], pt[1], pt[2]); b.velocity.set(0, 0, 0);
     this.hp = PLAYER.MAX_HP; this.dead = false; this.knockback = false; this.fallSpeed = 0; this.airTime = 0;
   }
@@ -98,10 +136,22 @@ export class LocalPlayer {
 
   damage(n) {
     if (this.dead || n <= 0) return;
+    this.onHurt?.(n);
     this.hp = Math.max(0, this.hp - n);
     if (this.hp <= 0) this._die();
   }
-  _die() { this.dead = true; this.deathTimer = PLAYER.RESPAWN_DELAY; this.knockback = false; }
+  _die() { this.dead = true; this.deathTimer = PLAYER.RESPAWN_DELAY; this.knockback = false; this.onDeath?.(); }
+
+  // melee etc: damage + a little shove. dir = [x,y,z]
+  hurt(dmg, dir) {
+    if (this.dead) return;
+    this.damage(dmg);
+    if (!this.dead && dir) {
+      const l = Math.hypot(dir[0], dir[1], dir[2]) || 1;
+      this.body.velocity.x += dir[0] / l * 4; this.body.velocity.z += dir[2] / l * 4; this.body.velocity.y += 2.5;
+      this.grounded = false;
+    }
+  }
 
   // called by main for every explosion (host and clients alike)
   applyBlast(o, ex) {
@@ -113,8 +163,27 @@ export class LocalPlayer {
     const ux = dx / (d || 1), uy = dy / (d || 1) + 0.6, uz = dz / (d || 1), l = Math.hypot(ux, uy, uz);
     const v = ex.force * f * 0.9;
     b.velocity.x += ux / l * v; b.velocity.y += uy / l * v; b.velocity.z += uz / l * v;
+    this.unseat(true);
     this.knockback = true; this.knockTime = 0; this.grounded = false; this.airFromJump = false;
     this.damage(ex.damage * f);
+  }
+
+  // ---- chairs ----
+  sit(prop) {
+    const m = prop.mesh;
+    if (_v.set(0, 1, 0).applyQuaternion(m.quaternion).y < 0.6) return false;      // tipped over
+    this.seat = { prop, t: 0 };
+    this.body.collisionFilterMask = GROUPS.WORLD;                                // ignore the chair itself while seated
+    this.knockback = false;
+    return true;
+  }
+  unseat(silent = false) {
+    if (!this.seat) return;
+    this.seat = null;
+    const b = this.body;
+    b.collisionFilterMask = GROUPS.WORLD | GROUPS.PROP;
+    if (!silent) { b.position.x -= Math.sin(this.yaw) * 0.75; b.position.z -= Math.cos(this.yaw) * 0.75; b.position.y += 0.1; }
+    b.velocity.set(0, 0, 0);
   }
 
   _land() {
@@ -126,6 +195,20 @@ export class LocalPlayer {
   update(dt, keys, enabled) {
     const b = this.body, p = b.position;
     const down = a => enabled && !this.dead && keyHeld(keys, a);
+
+    if (this.seat) {                                    // glued to the chair
+      const pr = this.seat.prop;
+      if (this.dead || !this.physics.props.has(pr.id)) this.unseat();
+      else {
+        this.seat.t += dt;
+        const m = pr.mesh;
+        _v.set(0, -pr.spec.size[1], 0).applyQuaternion(m.quaternion).add(m.position);   // feet at the chair's floor
+        b.position.set(_v.x, _v.y, _v.z); b.velocity.set(0, 0, 0);
+        this.grounded = true; this.airTime = 0; this.fallSpeed = 0; this.knockback = false;
+        if (down('jump') && this.seat.t > 0.3) this.unseat();
+        else { this.state = 'sit'; return; }
+      }
+    }
 
     // ground probe from just above the feet to just below them
     const hit = this.physics.raycast(new CANNON.Vec3(p.x, p.y + 0.2, p.z), new CANNON.Vec3(p.x, p.y - 0.15, p.z));
@@ -139,7 +222,6 @@ export class LocalPlayer {
     if (this.dead) { this.deathTimer -= dt; if (this.deathTimer <= 0) this.onRespawn?.(); }
     if (p.y < -40 && !this.dead) { this.hp = 0; this._die(); }
 
-    // input -> desired velocity
     const f = (down('forward') ? 1 : 0) - (down('back') ? 1 : 0);
     const s = (down('right') ? 1 : 0) - (down('left') ? 1 : 0);
     // sprint only while moving FORWARD (w, or w + a/d). sideways-only or backwards never sprints.
@@ -154,7 +236,7 @@ export class LocalPlayer {
     if (this.dead) {
       const k = Math.exp(-6 * dt); b.velocity.x *= k; b.velocity.z *= k;
     } else if (this.knockback) {
-      if (this.grounded) { const k = Math.exp(-3 * dt); b.velocity.x *= k; b.velocity.z *= k; }   // slide to a stop
+      if (this.grounded) { const k = Math.exp(-3 * dt); b.velocity.x *= k; b.velocity.z *= k; }
     } else {
       const k = 1 - Math.exp(-(this.grounded ? 14 : 3) * dt);     // snappy on ground, floaty in the air
       b.velocity.x += (dx * speed - b.velocity.x) * k;
@@ -178,7 +260,6 @@ export class LocalPlayer {
     else st = s < 0 ? 'left' : 'right';
     this.state = st;
 
-    // footsteps
     if (this.grounded && !this.dead && hs > 1) {
       this.stepTimer -= dt * (hs / PLAYER.WALK);
       if (this.stepTimer <= 0) { this.stepTimer = 0.5; audio.play('footstep_' + this.surface, { volume: 0.6, rate: 0.92 + Math.random() * 0.16 }); }
@@ -188,7 +269,8 @@ export class LocalPlayer {
   // call after the physics step so the camera never lags a frame behind the body
   placeCamera(dt) {
     const k = 1 - Math.exp(-6 * dt);
-    this.eye += ((this.dead ? 0.4 : PLAYER.EYE) - this.eye) * k;
+    const eye = this.dead ? 0.4 : this.seat ? PLAYER.EYE - PLAYER.SIT_DROP : PLAYER.EYE;
+    this.eye += (eye - this.eye) * k;
     this.roll += ((this.dead ? 0.9 : 0) - this.roll) * k;
     const p = this.body.position;
     this.camera.position.set(p.x, p.y + this.eye, p.z);

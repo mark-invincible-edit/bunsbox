@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bunsbox - browser sandbox</title>
+  <meta name="description" content="a small gmod-style sandbox that runs in your browser, with peer-to-peer multiplayer.">
+  <meta name="color-scheme" content="dark">
+  <link rel="stylesheet" href="css/style.css">
+  <!-- pinned cdn versions, no build step -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+      "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js",
+      "peerjs": "https://cdn.jsdelivr.net/npm/peerjs@1.5.4/+esm"
+    }
+  }
+  </script>
+</head>
+<body>
+  <canvas id="game" aria-label="3d game view"></canvas>
+
+  <!-- in-game hud -->
+  <div id="hud" hidden>
+    <div id="crosshair" aria-hidden="true"></div>
+    <div id="hp" role="meter" aria-label="health" aria-valuemin="0" aria-valuemax="100"><div id="hp-fill"></div><span id="hp-text">100</span></div>
+    <div id="info"><span id="room"></span><span id="players"></span></div>
+    <div id="death" hidden></div>
+    <aside id="help" hidden aria-label="controls"><h2>controls</h2><dl id="help-list"></dl></aside>
+    <div id="toasts" role="status" aria-live="polite"></div>
+    <button id="lockhint" type="button" hidden>click to capture the mouse</button>
+  </div>
+
+  <!-- spawn menu: shown while the spawn key is held -->
+  <div id="spawnmenu" hidden>
+    <div id="cats" role="tablist" aria-label="spawn categories"></div>
+    <div id="items"></div>
+    <footer>
+      <button id="clear-all" type="button">clear all props</button>
+      <small id="spawn-hint"></small>
+    </footer>
+  </div>
+
+  <main id="menus">
+    <section id="screen-loading" class="screen">
+      <h1>bunsbox</h1>
+      <progress id="load-bar" max="1" value="0"></progress>
+      <p id="loading-text" role="status">loading assets...</p>
+    </section>
+
+    <section id="screen-title" class="screen" hidden>
+      <h1>bunsbox</h1>
+      <p id="notice" role="alert" hidden></p>
+      <label class="field">your name
+        <input id="player-name" maxlength="16" autocomplete="off" placeholder="player">
+      </label>
+      <div class="stack">
+        <button id="btn-sp" class="primary" type="button">singleplayer</button>
+        <button id="btn-mp" type="button">multiplayer</button>
+        <button id="btn-settings-title" type="button">settings</button>
+      </div>
+    </section>
+
+    <section id="screen-mp" class="screen" hidden>
+      <h2>multiplayer</h2>
+      <div class="stack">
+        <button id="btn-host" class="primary" type="button">host a game</button>
+        <form id="join-form" class="row">
+          <label class="field">room code
+            <input id="code-input" maxlength="8" autocomplete="off" placeholder="ABCDE" spellcheck="false">
+          </label>
+          <button id="btn-join" type="submit">join</button>
+        </form>
+        <p id="mp-status" role="status"></p>
+        <button id="btn-mp-back" type="button">back</button>
+      </div>
+    </section>
+
+    <section id="screen-maps" class="screen" hidden>
+      <h2 id="maps-title">pick a map</h2>
+      <div id="map-list"></div>
+      <p id="maps-status" role="status"></p>
+      <button id="btn-maps-back" type="button">back</button>
+    </section>
+  </main>
+
+  <div id="pause" class="overlay" role="dialog" aria-modal="true" aria-labelledby="pause-title" hidden>
+    <div class="panel stack">
+      <h2 id="pause-title">paused</h2>
+      <p id="pause-room"></p>
+      <button id="btn-resume" class="primary" type="button">resume</button>
+      <button id="btn-settings" type="button">settings</button>
+      <button id="btn-exit" type="button">return to menu</button>
+    </div>
+  </div>
+
+  <div id="settings" class="overlay" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden>
+    <div class="panel stack">
+      <h2 id="settings-title">settings</h2>
+      <label class="field">mouse sensitivity <input id="set-sens" type="range" min="0.2" max="3" step="0.05"></label>
+      <label class="field">volume <input id="set-volume" type="range" min="0" max="1" step="0.05"></label>
+      <label class="field">field of view <input id="set-fov" type="range" min="60" max="110" step="1"></label>
+      <button id="btn-settings-back" class="primary" type="button">back</button>
+    </div>
+  </div>
+
+  <noscript><p class="notice-static">this game needs javascript.</p></noscript>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

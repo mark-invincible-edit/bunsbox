@@ -6,8 +6,10 @@
   <title>bunsbox - browser sandbox</title>
   <meta name="description" content="a small gmod-style sandbox that runs in your browser, with peer-to-peer multiplayer.">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#14161a">
+  <!-- inline svg favicon, no file needed -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23f2b01e'/%3E%3Cpath d='M32 11 51 21.5v21L32 53 13 42.5v-21z' fill='%23161a1f'/%3E%3Cpath d='M32 11v21m0 0 19-10.5M32 32 13 21.5M32 32v21' stroke='%23f2b01e' stroke-width='3' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="css/style.css">
-  <!-- pinned cdn versions, no build step -->
   <script type="importmap">
   {
     "imports": {
@@ -24,12 +26,15 @@
 
   <!-- in-game hud -->
   <div id="hud" hidden>
+    <div id="hurt" aria-hidden="true"></div>
     <div id="crosshair" aria-hidden="true"></div>
+    <div id="prompt" hidden></div>
     <div id="hp" role="meter" aria-label="health" aria-valuemin="0" aria-valuemax="100"><div id="hp-fill"></div><span id="hp-text">100</span></div>
     <div id="info"><span id="room"></span><span id="players"></span></div>
     <div id="death" hidden></div>
     <aside id="help" hidden aria-label="controls"><h2>controls</h2><dl id="help-list"></dl></aside>
     <div id="toasts" role="status" aria-live="polite"></div>
+    <div id="hotbar-wrap"><div id="item-hint"></div><div id="hotbar" hidden></div></div>
     <button id="lockhint" type="button" hidden>click to capture the mouse</button>
   </div>
 
@@ -52,6 +57,7 @@
 
     <section id="screen-title" class="screen" hidden>
       <h1>bunsbox</h1>
+      <p class="tag">a sandbox that lives in your browser</p>
       <p id="notice" role="alert" hidden></p>
       <label class="field">your name
         <input id="player-name" maxlength="16" autocomplete="off" placeholder="player">

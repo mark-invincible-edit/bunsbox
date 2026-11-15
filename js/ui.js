@@ -1,0 +1,175 @@
+// ui.js - menus, spawn menu, hud, pause, settings. plain dom, real buttons.
+import { MAPS, drawPreview } from './maps.js';
+import { SPAWNABLES, CATEGORIES } from './spawnables.js';
+import { KEYS } from './config.js';
+import * as audio from './audio.js';
+
+const $ = id => document.getElementById(id);
+const SETTINGS_KEY = 'bunsbox.settings', NAME_KEY = 'bunsbox.name';
+const read = k => { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } };
+const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} };
+
+export const settings = { sens: 1, volume: 0.7, fov: 75, ...(read(SETTINGS_KEY) || {}) };
+
+let h = {}, intent = 'sp', activeCat = CATEGORIES[0], helpTimer = 0, settingsReturn = null;
+
+const keyLabel = c => c.startsWith('Key') ? c.slice(3) : c.startsWith('Shift') ? 'Shift' : c;
+const labels = a => [...new Set(KEYS[a].map(keyLabel))].join(' / ');
+export const playerName = () => ($('player-name').value.trim() || 'player').slice(0, 16);
+
+export function init(handlers) {
+  h = handlers;
+
+  // generic click sound + audio unlock
+  document.addEventListener('click', e => { if (e.target.closest('button')) { audio.unlock(); audio.play('click'); } });
+
+  $('player-name').value = read(NAME_KEY) || '';
+  $('player-name').addEventListener('change', () => write(NAME_KEY, $('player-name').value.trim()));
+
+  // title / multiplayer / maps
+  $('btn-sp').addEventListener('click', () => { intent = 'sp'; openMaps(); });
+  $('btn-mp').addEventListener('click', () => { setStatus('mp-status', ''); showScreen('mp'); });
+  $('btn-mp-back').addEventListener('click', () => showScreen('title'));
+  $('btn-host').addEventListener('click', () => { intent = 'host'; openMaps(); });
+  $('btn-maps-back').addEventListener('click', () => showScreen(intent === 'sp' ? 'title' : 'mp'));
+  $('btn-settings-title').addEventListener('click', () => openSettings($('btn-settings-title')));
+
+  $('join-form').addEventListener('submit', async e => {
+    e.preventDefault();
+    write(NAME_KEY, $('player-name').value.trim());
+    const code = $('code-input').value.trim().toUpperCase();
+    if (code.length < 4) { setStatus('mp-status', 'enter the room code first', true); return; }
+    setStatus('mp-status', 'connecting...');
+    lockButtons(true);
+    try { await h.onJoin(code, playerName()); } catch (err) { setStatus('mp-status', err.message, true); }
+    lockButtons(false);
+  });
+
+  // pause + settings
+  $('btn-resume').addEventListener('click', () => h.onResume());
+  $('btn-settings').addEventListener('click', () => openSettings($('btn-settings')));
+  $('btn-exit').addEventListener('click', () => h.onExit());
+  $('btn-settings-back').addEventListener('click', closeSettings);
+  for (const [id, key] of [['set-sens', 'sens'], ['set-volume', 'volume'], ['set-fov', 'fov']]) {
+    $(id).value = settings[key];
+    $(id).addEventListener('input', () => { settings[key] = Number($(id).value); write(SETTINGS_KEY, settings); h.onSettings?.(); });
+  }
+
+  // in-game
+  $('lockhint').addEventListener('click', () => h.onLockClick());
+  $('clear-all').addEventListener('click', () => h.onClearAll());
+  buildSpawnMenu();
+  buildHelp();
+}
+
+// ---- screens
+const SCREENS = ['loading', 'title', 'mp', 'maps'];
+export function showScreen(name) {
+  $('menus').hidden = name === 'none';
+  for (const s of SCREENS) $('screen-' + s).hidden = s !== name;
+  if (name !== 'none') $('screen-' + name).querySelector('button, input')?.focus();
+}
+export function showTitle(notice) {
+  $('hud').hidden = true; $('pause').hidden = true; $('settings').hidden = true; $('spawnmenu').hidden = true;
+  $('notice').hidden = !notice; $('notice').textContent = notice || '';
+  showScreen('title');
+}
+export function setLoading(frac, text) { $('load-bar').value = frac; if (text) $('loading-text').textContent = text; }
+export function fatal(msg) { $('load-bar').hidden = true; $('loading-text').textContent = msg; $('loading-text').classList.add('err'); }
+
+function setStatus(id, msg, isErr = false) { const el = $(id); el.textContent = msg; el.classList.toggle('err', isErr); }
+function lockButtons(on) { document.querySelectorAll('#screen-mp button, #screen-maps button').forEach(b => { b.disabled = on; }); }
+
+function openMaps() {
+  $('maps-title').textContent = intent === 'host' ? 'pick a map for your room' : 'pick a map';
+  setStatus('maps-status', '');
+  const box = $('map-list');
+  box.textContent = '';
+  for (const m of MAPS) {
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'map-card';
+    const cv = document.createElement('canvas'); cv.width = 320; cv.height = 180; cv.setAttribute('aria-hidden', 'true');
+    drawPreview(cv, m);
+    const t = document.createElement('strong'); t.textContent = m.name;
+    const d = document.createElement('span'); d.textContent = m.desc;
+    btn.append(cv, t, d);
+    btn.addEventListener('click', async () => {
+      write(NAME_KEY, $('player-name').value.trim());
+      if (intent === 'sp') { h.onStartSP(m.id); return; }
+      setStatus('maps-status', 'creating room...');
+      lockButtons(true);
+      try { await h.onHost(m.id, playerName()); } catch (err) { setStatus('maps-status', err.message, true); }
+      lockButtons(false);
+    });
+    box.append(btn);
+  }
+  showScreen('maps');
+}
+
+// ---- hud
+export function showHUD(on) { $('hud').hidden = !on; if (on) { showScreen('none'); showHelp(true); clearTimeout(helpTimer); helpTimer = setTimeout(() => showHelp(false), 9000); } }
+export function hideGameUI() { $('hud').hidden = true; $('pause').hidden = true; $('settings').hidden = true; $('spawnmenu').hidden = true; }
+export function setHP(hp, max) {
+  $('hp-fill').style.width = (100 * hp / max) + '%';
+  $('hp-fill').style.background = hp < max * 0.3 ? 'var(--danger)' : 'var(--ok)';
+  $('hp-text').textContent = Math.ceil(hp);
+  $('hp').setAttribute('aria-valuenow', Math.ceil(hp));
+}
+export function setPlayers(n) { $('players').textContent = `players: ${n}`; }
+export function setRoom(code) { $('room').textContent = code ? `room: ${code}` : ''; }
+export function setDeath(text) { $('death').hidden = !text; $('death').textContent = text || ''; }
+export function showLockHint(on) { $('lockhint').hidden = !on; }
+export function showHelp(on) { $('help').hidden = !on; }
+export function toggleHelp() { clearTimeout(helpTimer); showHelp($('help').hidden); }
+export function toast(msg) {
+  const d = document.createElement('div'); d.textContent = msg; $('toasts').append(d);
+  setTimeout(() => d.remove(), 3500);
+}
+
+function buildHelp() {
+  const rows = [
+    ['move', 'W A S D'], ['jump', labels('jump')], ['sprint (forward only)', labels('sprint') + ' + W'],
+    ['spawn menu (hold)', labels('spawnMenu')], ['remove aimed prop', labels('remove')], ['undo last spawn', labels('undo')],
+    ['detonate aimed explosive', labels('detonate')], ['clear all props', labels('clearAll')], ['this help', labels('help')], ['pause', 'Esc'],
+  ];
+  const dl = $('help-list');
+  for (const [k, v] of rows) { const dt = document.createElement('dt'); dt.textContent = v; const dd = document.createElement('dd'); dd.textContent = k; dl.append(dt, dd); }
+  $('spawn-hint').textContent = `click an item to spawn it at the crosshair - ${labels('remove')} remove - ${labels('undo')} undo - ${labels('detonate')} detonate`;
+}
+
+// ---- spawn menu
+function buildSpawnMenu() {
+  const cats = $('cats');
+  for (const c of CATEGORIES) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.role = 'tab'; b.textContent = c; b.dataset.cat = c;
+    b.addEventListener('click', () => selectCat(c));
+    cats.append(b);
+  }
+  selectCat(activeCat);
+}
+function selectCat(c) {
+  activeCat = c;
+  for (const b of $('cats').children) b.setAttribute('aria-selected', String(b.dataset.cat === c));
+  const box = $('items'); box.textContent = '';
+  for (const s of SPAWNABLES.filter(x => x.category === c)) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'item';
+    const sw = document.createElement('i'); sw.style.background = '#' + s.color.toString(16).padStart(6, '0');
+    const n = document.createElement('span'); n.textContent = s.name;
+    b.append(sw, n);
+    b.addEventListener('click', () => h.onSpawnItem(s.id));
+    box.append(b);
+  }
+}
+export function openSpawn() { $('spawnmenu').hidden = false; }
+export function closeSpawn() { $('spawnmenu').hidden = true; }
+
+// ---- pause + settings
+export function showPause(on, room) {
+  $('pause').hidden = !on;
+  $('pause-room').textContent = room ? `room code: ${room}` : '';
+  if (on) $('btn-resume').focus(); else $('settings').hidden = true;
+}
+function openSettings(from) { settingsReturn = from; $('settings').hidden = false; $('btn-settings-back').focus(); }
+function closeSettings() { $('settings').hidden = true; settingsReturn?.focus(); }

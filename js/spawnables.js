@@ -18,12 +18,12 @@
 // if you scale a model, scale 'size' by hand to match.
 export const SPAWNABLES = [
   // ---- props ----
-  { id: 'crate', name: 'Crate', category: 'Props', glb: 'models/crate.glb', scale: 0.03, shape: 'box', size: [0.5, 0.5, 0.5], mass: 15, color: 0xb07a3c },
+  { id: 'crate', name: 'Crate', category: 'Props', glb: 'models/crate.glb', scale: 0.015, shape: 'box', size: [0.5, 0.5, 0.5], mass: 15, color: 0xb07a3c },
   { id: 'big_crate', name: 'Big Crate', category: 'Props', glb: 'models/crate.glb', scale: 0.034, shape: 'box', size: [1, 1, 1], mass: 120, color: 0xa06a30 },
-  { id: 'barrel', name: 'Barrel', category: 'Props', glb: 'models/barrel.glb', scale: 0.01, shape: 'box', size: [0.3, 0.45, 0.3], mass: 25, color: 0x3f6fb0 },
-  { id: 'table', name: 'Table', category: 'Props', glb: 'models/table.glb', scale: 1, shape: 'box', size: [0.7, 0.4, 0.45], mass: 20, color: 0x8b5a2b },
-  { id: 'chair', name: 'Chair', category: 'Props', glb: 'models/chair.glb', scale: 0.3, shape: 'box', size: [0.25, 0.45, 0.25], mass: 6, color: 0x7a4e24 },
-  { id: 'cone', name: 'Traffic Cone', category: 'Props', glb: 'models/traffic_cone.glb', scale: 0.2, shape: 'box', size: [0.17, 0.35, 0.17], mass: 2, color: 0xff7a1a },
+  { id: 'barrel', name: 'Barrel', category: 'Props', glb: 'models/barrel.glb', scale: 0.03, shape: 'box', size: [0.3, 0.45, 0.3], mass: 25, color: 0x3f6fb0 },
+  { id: 'table', name: 'Table', category: 'Props', glb: 'models/table.glb', scale: 0.3, shape: 'box', size: [0.7, 0.4, 0.45], mass: 20, color: 0x8b5a2b },
+  { id: 'chair', name: 'Chair', category: 'Props', glb: 'models/chair.glb', scale: 0.13, shape: 'box', size: [0.25, 0.45, 0.25], mass: 6, color: 0x7a4e24 },
+  { id: 'cone', name: 'Traffic Cone', category: 'Props', glb: 'models/traffic_cone.glb', scale: 0.05, shape: 'box', size: [0.17, 0.35, 0.17], mass: 2, color: 0xff7a1a },
 
   // ---- physics objects ----
   { id: 'ball', name: 'Ball', category: 'Physics Objects', glb: 'models/ball.glb', scale: 0.4, shape: 'sphere', size: [0.35], mass: 3, color: 0xe04040, bouncy: true },

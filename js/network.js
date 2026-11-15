@@ -88,12 +88,21 @@ export class Net {
       return;
     }
     if (!c) return;
+    const h = this.h;
     switch (m.t) {
-      case 'st': c.state = m; this.h.onClientState(c, m); break;
-      case 'spawn': this.h.onSpawnReq(c, m); break;
-      case 'remove': this.h.onRemoveReq(c, m); break;
-      case 'clear': this.h.onClearReq(c, m); break;
-      case 'det': this.h.onDetReq(c, m); break;
+      case 'st': c.state = m; h.onClientState(c, m); break;
+      case 'spawn': h.onSpawnReq(c, m); break;
+      case 'remove': h.onRemoveReq(c, m); break;
+      case 'clear': h.onClearReq(c, m); break;
+      case 'det': h.onDetReq(c, m); break;
+      case 'use': h.onUseReq(c, m); break;
+      case 'grab': h.onGrabReq(c, m); break;
+      case 'gt': h.onGrabTarget(c, m); break;
+      case 'rel': h.onGrabRelease(c, m); break;
+      case 'melee': h.onMeleeReq(c, m); break;
+      case 'hit': h.onHitReq(c, m); break;
+      case 'glue': h.onGlueReq(c, m); break;
+      case 'unglue': h.onUnglueReq(c, m); break;
     }
   }
 
@@ -145,6 +154,9 @@ export class Net {
       case 'removed': h.onRemoved(m); break;
       case 'cleared': h.onCleared(m); break;
       case 'boom': h.onBoom(m); break;
+      case 'thr': h.onThruster(m); break;
+      case 'give': h.onGive(m); break;
+      case 'hurt': h.onHurt(m); break;
       case 'join': h.onJoin(m); break;
       case 'leave': h.onLeave(m); break;
       case 'toast': h.onToast(m); break;
@@ -169,10 +181,13 @@ export class RemotePlayers {
     if (this.map.has(id)) return;
     const av = new Avatar(name);
     this.parent.add(av.group);
-    this.map.set(id, { id, name, av, buf: new SnapshotBuffer() });
+    this.map.set(id, { id, name, av, buf: new SnapshotBuffer(), grab: 0 });
   }
   remove(id) { const r = this.map.get(id); if (r) { r.av.dispose(); this.map.delete(id); } }
-  push(id, st, t) { const r = this.map.get(id); if (r) r.buf.push(t, st.p, null, { yaw: st.yaw, pitch: st.pitch, state: st.an }); }
+  push(id, st, t) {
+    const r = this.map.get(id);
+    if (r) r.buf.push(t, st.p, null, { yaw: st.yaw, pitch: st.pitch, state: st.an, item: typeof st.it === 'string' ? st.it : null, grab: Number.isInteger(st.gr) ? st.gr : 0 });
+  }
 
   update(dt, renderTime) {
     for (const r of this.map.values()) {
@@ -181,6 +196,8 @@ export class RemotePlayers {
       r.av.group.position.set(s.p[0], s.p[1], s.p[2]);
       r.av.group.rotation.y = s.ex.yaw + PLAYER.MODEL_YAW_OFFSET;
       r.av.setState(s.ex.state);
+      r.av.holdItem(s.ex.item);
+      r.grab = s.ex.grab;
       r.av.update(dt);
     }
   }

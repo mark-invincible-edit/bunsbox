@@ -13,11 +13,16 @@
 //             force  = peak speed (m/s) given to things at the center
 //             fuse   = seconds until it blows by itself
 //             impact = blows when it hits something faster than this (m/s)
-// seat      optional, true = press E to sit on it (needs to be upright)
+// seat      optional, true = press E to sit on it (works even when it is tipped over, you tip with it)
 // thruster  optional { thrust, dir } press E to toggle. thrust = newtons, dir = local direction it pushes
 //             [0,0,-1] = forward (the way you faced when you spawned it), [0,1,0] = up
 // item      optional, an id from ITEMS in items.js. pressing E picks it up into your inventory.
 //             items ignore glb/scale here: their model + size come from items.js (auto-fitted)
+// npc       optional, true = spawns a walking npc (player model + animations) instead of a prop
+// op        optional, true = server owner only: only the host / singleplayer can spawn it AND pick it up.
+//             a category with only op entries is hidden from everyone else
+// nextbot   optional, true = chases the nearest person and one shots them. use with dialog: 'nextbot'
+// dialog    optional, 'nextbot' = opens the image link + speed dialog before spawning
 //
 // note: 'size' is the physics collider in world units, 'scale' only scales the model.
 // if you scale a model, scale 'size' by hand to match.
@@ -43,7 +48,10 @@ export const SPAWNABLES = [
   { id: 'timed_bomb', name: 'Timed Bomb (4s)', category: 'Explosives', glb: 'models/bomb.glb', scale: 3, shape: 'sphere', size: [0.3], mass: 8, color: 0x222222, explosive: { radius: 12, force: 24, damage: 90, fuse: 4 } },
   { id: 'grenade', name: 'Impact Grenade', category: 'Explosives', glb: 'models/grenade.glb', scale: 0.6, shape: 'sphere', size: [0.12], mass: 1, color: 0x4a6b2a, explosive: { radius: 6, force: 14, damage: 60, impact: 6 } },
 
-  // ---- animals / npcs (physics props, no ai) ----
+  // ---- animals / npcs ----
+  // npc = the player model + animations. wanders, looks at you when close, runs if you attack it, picks up items it sees
+  { id: 'npc', name: 'NPC', category: 'Animals/NPCs', shape: 'box', size: [0.3, 0.9, 0.3], mass: 1, color: 0x3b82f6, npc: true },
+  // pigeons are physics props, no ai
   { id: 'pigeon', name: 'Pigeon', category: 'Animals/NPCs', glb: 'models/pigeon.glb', scale: 1, shape: 'box', size: [0.18, 0.14, 0.28], mass: 1, color: 0x9aa3ad },
   { id: 'big_pigeon', name: 'Big Pigeon', category: 'Animals/NPCs', glb: 'models/pigeon.glb', scale: 4, shape: 'box', size: [0.72, 0.56, 1.12], mass: 40, color: 0x9aa3ad },
 
@@ -52,6 +60,13 @@ export const SPAWNABLES = [
   { id: 'item_crowbar', name: 'Crowbar', category: 'Items', shape: 'box', size: [0.35, 0.04, 0.04], mass: 2, color: 0xc0392b, item: 'crowbar' },
   { id: 'item_physgun', name: 'Physics Gun', category: 'Items', shape: 'box', size: [0.25, 0.07, 0.07], mass: 3, color: 0xd0d4da, item: 'physgun' },
   { id: 'item_glue', name: 'Glue', category: 'Items', shape: 'box', size: [0.14, 0.05, 0.05], mass: 0.5, color: 0xf5f5f5, item: 'glue' },
+  { id: 'item_hinge', name: 'Hinge', category: 'Items', shape: 'box', size: [0.1, 0.05, 0.05], mass: 0.5, color: 0xaab0b8, item: 'hinge' },
+  { id: 'item_gun', name: 'Gun', category: 'Items', shape: 'box', size: [0.2, 0.06, 0.04], mass: 1, color: 0x2b2f36, item: 'gun' },
+
+  // ---- OP: server owner only (op: true). only the owner can spawn AND pick these up ----
+  { id: 'op_nextbot', name: 'Nextbot', category: 'OP', dialog: 'nextbot', nextbot: true, shape: 'sphere', size: [0.6], mass: 60, color: 0xff2255, op: true },
+  { id: 'op_nuke', name: 'Nuke (5s)', category: 'OP', glb: 'models/bomb.glb', scale: 6, shape: 'sphere', size: [0.6], mass: 30, color: 0xffcc00, op: true, explosive: { radius: 60, force: 70, damage: 400, fuse: 5 } },
+  { id: 'op_item_supergun', name: 'Super Gun', category: 'OP', shape: 'box', size: [0.25, 0.06, 0.05], mass: 1, color: 0xe8b41e, item: 'supergun', op: true },
 ];
 
 const byId = new Map();

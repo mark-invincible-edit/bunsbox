@@ -1,6 +1,6 @@
 // main.js - bootstrap, game session, input, main loop.
 import * as THREE from 'three';
-import { NET, PLAYER, LIMITS, ITEMS_CFG as IC, keyIs, TEXTURE_FILES, SOUND_NAMES } from './config.js';
+import { NET, PLAYER, LIMITS, NPC, NEXTBOT, ITEMS_CFG as IC, keyIs, TEXTURE_FILES, SOUND_NAMES } from './config.js';
 import { SPAWNABLES, getSpawnable } from './spawnables.js';
 import { ITEMS, Inventory, ViewModel } from './items.js';
 import * as assets from './assets.js';
@@ -10,11 +10,15 @@ import { Physics } from './physics.js';
 import { LocalPlayer } from './player.js';
 import { Effects, Beam, loadExplosionImage } from './effects.js';
 import { Net, RemotePlayers, friendlyError } from './network.js';
+import { Npcs, updateNextbots } from './npcs.js';
+import { generatePreviews } from './preview.js';
+import { safeImageUrl } from './imgutil.js';
 import * as ui from './ui.js';
 
 const now = () => performance.now() / 1000;
 const r3 = v => Math.round(v * 1000) / 1000;
 const okVec = a => Array.isArray(a) && a.length === 3 && a.every(Number.isFinite);
+const okQuat = a => Array.isArray(a) && a.length === 4 && a.every(Number.isFinite);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 const _tip = new THREE.Vector3(), _tip2 = new THREE.Vector3();
 
@@ -50,6 +54,9 @@ async function boot() {
   let done = 0;
   jobs.forEach(p => p.then(() => ui.setLoading(++done / jobs.length, `loading assets ${done}/${jobs.length}`)));
   await Promise.race([Promise.all(jobs), new Promise(r => setTimeout(r, 30000))]);   // hard cap, then go anyway
+  ui.setLoading(1, 'rendering previews...');
+  await new Promise(r => setTimeout(r, 30));          // let the loading text paint
+  try { ui.setPreviews(generatePreviews()); } catch (e) { console.warn('[preview] failed', e); }
   ui.showTitle();
 }
 
@@ -79,14 +86,15 @@ function startSession({ mode, mapId, net = null, name = 'player', code = '', wel
   player.spawn(pickSpawn(map));
   player.onRespawn = () => player.spawn(pickSpawn(map));
   player.onHurt = () => ui.flashHurt();
-  player.onDeath = () => { grabEnd(); clearGlueSel(); };
+  player.onDeath = () => { grabEnd(); clearJointSel(); };
   const effects = new Effects(group);
   const remote = new RemotePlayers(group);
   const vm = new ViewModel(camera);
 
   game = { mode, map, group, sun, physics, player, effects, remote, vm, net, name, code, myProps: [], names: new Map(),
-    paused: false, spawnHeld: false, tickAcc: 0, myId: welcome ? welcome.you : 0, lastHP: -1,
-    inv: null, beams: new Map(), grab: null, grabTarget: null, glueSel: null, crowbarCd: 0 };
+    npcs: authority ? new Npcs(group, physics) : null, npcView: authority ? null : new RemotePlayers(group),
+    paused: false, modal: false, spawnHeld: false, tickAcc: 0, myId: welcome ? welcome.you : 0, lastHP: -1,
+    inv: null, beams: new Map(), grab: null, grabTarget: null, jointSel: null, crowbarCd: 0, gunCd: 0, mouseDown: false };
   const g = game;
   g.inv = new Inventory(onInvChange);
 
@@ -94,7 +102,7 @@ function startSession({ mode, mapId, net = null, name = 'player', code = '', wel
     physics.hooks.onSpawn = p => {
       handleSpawnFx(p);
       if (p.owner === 0) g.myProps.push(p.id);
-      net?.broadcast({ t: 'spawned', id: p.id, key: p.key, p: [r3(p.body.position.x), r3(p.body.position.y), r3(p.body.position.z)],
+      net?.broadcast({ t: 'spawned', id: p.id, key: p.key, d: p.data || null, p: [r3(p.body.position.x), r3(p.body.position.y), r3(p.body.position.z)],
         q: [r3(p.body.quaternion.x), r3(p.body.quaternion.y), r3(p.body.quaternion.z), r3(p.body.quaternion.w)], by: p.owner });
     };
     physics.hooks.onRemove = id => net?.broadcast({ t: 'removed', id });
@@ -109,9 +117,13 @@ function startSession({ mode, mapId, net = null, name = 'player', code = '', wel
 
   if (welcome) {   // late joiner: rebuild the current world
     for (const p of welcome.players) { g.names.set(p.id, p.name); if (p.id !== welcome.you) remote.add(p.id, p.name); }
-    for (const p of welcome.props) { physics.spawnProp(p.key, p.p, 0, { id: p.id, quat: p.q, owner: -1, silent: true }); if (p.a) physics.setThruster(p.id, true); }
+    for (const p of welcome.props) {
+      physics.spawnProp(p.key, p.p, 0, { id: p.id, quat: okQuat(p.q) ? p.q : null, owner: -1, silent: true, data: cleanRemoteData(p.d) });
+      if (p.a) physics.setThruster(p.id, true);
+    }
   }
 
+  ui.setOwner(authority);
   ui.showHUD(true);
   ui.setRoom(code);
   ui.setPlayers(1 + remote.map.size);
@@ -128,7 +140,7 @@ function endSession() {
   keys.clear();
   try { document.exitPointerLock?.(); } catch (e) {}
   audio.stopAmbient();
-  g.remote.clear();
+  g.remote.clear(); g.npcView?.clear(); g.npcs?.clear();
   g.vm.set(null); camera.remove(g.vm.root);
   scene.remove(g.group);
   g.group.traverse(o => { if (o.geometry) o.geometry.dispose?.(); });
@@ -145,26 +157,96 @@ function handleExplosion(pos, ex) {
   const d = camera.position.distanceTo(new THREE.Vector3(pos.x, pos.y, pos.z));
   g.effects.shake = Math.max(g.effects.shake, Math.max(0, 1 - d / (ex.radius * 3)) * 0.6);
   g.player.applyBlast(pos, ex);
+  g.npcs?.blast(pos, ex);
 }
 function handleSpawnFx(p) { audio.play('spawn', { at: p.body.position }); }
 
-// ---------------------------------------------------------------- aiming + prop actions
+// ---------------------------------------------------------------- aiming + helpers
 function aim(reach = LIMITS.REACH) {
   const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
   return { dir, hit: game.physics.raycastRay(camera.position, dir, reach) };
 }
 const propAt = hit => (hit && hit.body.propId !== undefined) ? game.physics.props.get(hit.body.propId) : null;
 
-function requestSpawn(key) {
+// everything a bullet / crowbar can hit besides props: other players and npcs
+function entities(excludeId) {
+  const g = game, out = [];
+  for (const [id, r] of g.remote.map) if (id !== excludeId) out.push({ kind: 'player', id, pos: r.av.group.position, dead: r.av.state === 'dead' });
+  if (excludeId !== g.myId) out.push({ kind: 'player', id: g.myId, pos: g.player.body.position, dead: g.player.dead });
+  if (g.npcs) for (const n of g.npcs.list.values()) out.push({ kind: 'npc', id: n.id, pos: n.body.position, dead: n.hp <= 0 });
+  else for (const [id, r] of g.npcView.map) out.push({ kind: 'npc', id, pos: r.av.group.position, dead: r.av.state === 'dead' });
+  return out;
+}
+function raySphere(o, d, cx, cy, cz, rad) {
+  const ox = cx - o.x, oy = cy - o.y, oz = cz - o.z, tca = ox * d.x + oy * d.y + oz * d.z;
+  if (tca < 0) return null;
+  const d2 = ox * ox + oy * oy + oz * oz - tca * tca;
+  if (d2 > rad * rad) return null;
+  return Math.max(0, tca - Math.sqrt(rad * rad - d2));
+}
+function rayHitEntities(origin, dir, maxDist, excludeId) {
+  let best = null;
+  for (const e of entities(excludeId)) {
+    if (e.dead) continue;
+    for (const [cy, rad] of [[0.5, 0.5], [1.25, 0.45]]) {          // two spheres per body
+      const t = raySphere(origin, dir, e.pos.x, e.pos.y + cy, e.pos.z, rad);
+      if (t !== null && t <= maxDist && (!best || t < best.dist)) best = { kind: e.kind, id: e.id, dist: t };
+    }
+  }
+  return best;
+}
+function people() {                                  // living-or-not targets for npc + nextbot ai (authority only)
+  const g = game, p = g.player.body.position, out = [{ id: g.myId, x: p.x, y: p.y, z: p.z, dead: g.player.dead }];
+  for (const [id, r] of g.remote.map) { const q = r.av.group.position; out.push({ id, x: q.x, y: q.y, z: q.z, dead: r.av.state === 'dead' }); }
+  return out;
+}
+
+// ---------------------------------------------------------------- spawning
+function cleanData(spec, data) {                     // nextbot data. null = not a nextbot, undefined = invalid
+  if (!spec.nextbot) return null;
+  if (!data || !safeImageUrl(data.url)) return undefined;
+  return { url: data.url, speed: clamp(Number(data.speed) || NEXTBOT.SPEED_DEFAULT, NEXTBOT.SPEED_MIN, NEXTBOT.SPEED_MAX) };
+}
+function cleanRemoteData(d) {                        // data the host sent us: only keep a safe url
+  if (!d || typeof d !== 'object' || !safeImageUrl(d.url)) return null;
+  return { url: d.url, speed: Number(d.speed) || 0 };
+}
+
+// authority only. returns an error string or null
+function spawnLocal(g, key, pos, yaw, owner, data) {
+  const spec = getSpawnable(key);
+  if (!spec) return 'unknown item';
+  if (spec.npc) {
+    if (!g.npcs.spawn(pos, yaw + Math.PI)) return `npc limit reached (${NPC.MAX})`;
+    audio.play('spawn', { at: { x: pos[0], y: pos[1], z: pos[2] } });
+    return null;
+  }
+  const d = cleanData(spec, data);
+  if (spec.nextbot && !d) return 'that image link is not valid';
+  return g.physics.spawnProp(key, pos, yaw, { owner, data: d }) ? null : `prop limit reached (${LIMITS.MAX_PROPS})`;
+}
+
+function requestSpawn(key, data = null) {
   const g = game; if (!g || g.paused) return;
   const spec = getSpawnable(key); if (!spec) return;
+  if ((spec.op || spec.dialog) && g.mode === 'client') { ui.toast('only the server owner can spawn that'); return; }
   const { dir, hit } = aim();
-  const hh = spec.shape === 'sphere' ? spec.size[0] : spec.size[1];
+  const hh = spec.npc ? 0.02 : spec.shape === 'sphere' ? spec.size[0] : spec.size[1];
   let pos;
   if (hit) pos = [hit.point.x + hit.normal.x * (hh + 0.05), hit.point.y + hit.normal.y * (hh + 0.05), hit.point.z + hit.normal.z * (hh + 0.05)];
   else pos = [camera.position.x + dir.x * 4, camera.position.y + dir.y * 4, camera.position.z + dir.z * 4];
-  if (g.mode === 'client') g.net.send({ t: 'spawn', key, p: pos, yaw: g.player.yaw });
-  else if (!g.physics.spawnProp(key, pos, g.player.yaw, { owner: 0 })) ui.toast(`prop limit reached (${LIMITS.MAX_PROPS})`);
+  if (g.mode === 'client') { g.net.send({ t: 'spawn', key, p: pos, yaw: g.player.yaw }); return; }
+  const err = spawnLocal(g, key, pos, g.player.yaw, 0, data);
+  if (err) ui.toast(err);
+}
+
+function openNextbotDialog(key) {
+  const g = game; if (!g || g.mode === 'client') return;
+  closeSpawnMenu(false);
+  g.modal = true; g.mouseDown = false; keys.clear();
+  ui.openNextbot(
+    ({ url, speed }) => requestSpawn(key, { url, speed }),
+    () => { if (!game) return; game.modal = false; lock(); });
 }
 
 function removeById(id) {
@@ -211,13 +293,13 @@ function useKey() {
   if (g.player.seat) { if (t?.kind === 'thruster') toggleThruster(t.prop.id); else g.player.unseat(); return; }
   if (!t) return;
   if (t.kind === 'item') {
-    const item = t.prop.spec.item;
+    const spec = t.prop.spec, item = spec.item;
+    if (spec.op && g.mode === 'client') { ui.toast('only the server owner can pick that up'); return; }
     if (g.inv.has(item)) { ui.toast(`you already have the ${ITEMS[item].name.toLowerCase()}`); return; }
     if (g.mode === 'client') g.net.send({ t: 'use', id: t.prop.id });      // host removes it and sends us a 'give'
     else { g.physics.removeProp(t.prop.id); giveItem(item); }
-  } else if (t.kind === 'seat') {
-    if (!g.player.sit(t.prop)) ui.toast('that chair is tipped over');
-  } else toggleThruster(t.prop.id);
+  } else if (t.kind === 'seat') g.player.sit(t.prop);
+  else toggleThruster(t.prop.id);
 }
 
 // ---------------------------------------------------------------- items
@@ -227,47 +309,42 @@ function onInvChange() {
   ui.setHotbar(g.inv.list, g.inv.sel);
   g.vm.set(cur);
   if (cur !== 'physgun') grabEnd();
-  if (cur !== 'glue') clearGlueSel();
+  if (g.jointSel && g.jointSel.kind !== cur) clearJointSel();
 }
 
 function primaryDown() {
   const g = game, it = g.inv.current;
   if (!it || g.player.dead) return;
-  if (it === 'crowbar') crowbarSwing(); else if (it === 'physgun') grabStart(); else if (it === 'glue') glueClick();
+  if (it === 'crowbar') crowbarSwing();
+  else if (it === 'physgun') grabStart();
+  else if (it === 'glue' || it === 'hinge') jointClick(it);
+  // guns fire from the update loop while LMB is held
 }
 function secondaryDown() {
-  const g = game;
-  if (g.inv.current === 'glue' && !g.player.dead) glueRight();
+  const g = game, it = g.inv.current;
+  if ((it === 'glue' || it === 'hinge') && !g.player.dead) jointRight();
+}
+
+// --- hits (host decides the damage numbers, clients only say who/where)
+function deliverHit(kind, target, d, dmg, from) {
+  const g = game; if (!g) return;
+  if (kind === 'npc') { g.npcs?.hurt(target, dmg, { x: d[0], y: d[1], z: d[2] }, from); return; }
+  if (target === g.myId) g.player.hurt(dmg, d);
+  else { const c = g.net?.clients.get(target); if (c) g.net.sendTo(c, { t: 'hurt', dmg, d }); }
 }
 
 // --- crowbar
-function rayHitPlayer(origin, dir, maxDist) {
-  let best = null;
-  for (const [id, r] of game.remote.map) {
-    if (r.av.state === 'dead') continue;
-    const p = r.av.group.position;
-    for (const [cy, rad] of [[0.5, 0.5], [1.25, 0.45]]) {         // two spheres per player
-      const ox = p.x - origin.x, oy = p.y + cy - origin.y, oz = p.z - origin.z;
-      const tca = ox * dir.x + oy * dir.y + oz * dir.z;
-      if (tca < 0) continue;
-      const d2 = ox * ox + oy * oy + oz * oz - tca * tca;
-      if (d2 > rad * rad) continue;
-      const t = tca - Math.sqrt(rad * rad - d2);
-      if (t <= maxDist && (!best || t < best.dist)) best = { id, dist: Math.max(0, t) };
-    }
-  }
-  return best;
-}
 function crowbarSwing() {
   const g = game, C = IC.CROWBAR;
   if (g.crowbarCd > 0) return;
   g.crowbarCd = C.COOLDOWN; g.vm.swingNow(); audio.play('swing');
   const { dir, hit } = aim(C.REACH);
-  const ph = rayHitPlayer(camera.position, dir, C.REACH);
+  const ent = rayHitEntities(camera.position, dir, C.REACH, g.myId);
   const d = [dir.x, dir.y, dir.z];
-  if (ph && (!hit || ph.dist < hit.dist)) {
+  if (ent && (!hit || ent.dist < hit.dist)) {
     audio.play('hit');
-    if (g.mode === 'client') g.net.send({ t: 'hit', target: ph.id, d }); else deliverHit(ph.id, d);
+    if (g.mode === 'client') g.net.send({ t: 'hit', kind: ent.kind, target: ent.id, d });
+    else deliverHit(ent.kind, ent.id, d, C.DAMAGE, camera.position);
     return;
   }
   const p = propAt(hit);
@@ -281,10 +358,47 @@ function meleeProp(id, d) {           // authority: knock the prop back, set off
   g.physics.knockProp(id, { x: d[0], y: d[1], z: d[2] }, IC.CROWBAR.KNOCK);
   if (p.spec.explosive) g.physics.detonate(id);
 }
-function deliverHit(target, d) {      // host: route crowbar damage to the victim (damage amount is decided here, not by the client)
-  const g = game; if (!g) return;
-  if (target === 0) g.player.hurt(IC.CROWBAR.DAMAGE, d);
-  else { const c = g.net?.clients.get(target); if (c) g.net.sendTo(c, { t: 'hurt', dmg: IC.CROWBAR.DAMAGE, d }); }
+
+// --- guns: hold LMB. muzzle flash at the barrel tip, hitscan on the host.
+function gunFire() {
+  const g = game, it = g.inv.current, cfg = IC[ITEMS[it].gun];
+  if (g.gunCd > 0 || g.player.dead) return;
+  g.gunCd = cfg.COOLDOWN;
+  const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+  const wr = g.physics.raycastRay(camera.position, dir, cfg.RANGE);
+  const end = wr ? new THREE.Vector3(wr.point.x, wr.point.y, wr.point.z) : camera.position.clone().addScaledVector(dir, 60);
+  g.vm.recoilNow(); audio.play('shoot');
+  if (g.vm.tip(_tip)) { _tip.addScaledVector(dir, 0.07); g.effects.muzzle(_tip, 0.22); g.effects.tracer(_tip, end); }
+  const o = [r3(camera.position.x), r3(camera.position.y), r3(camera.position.z)], d = [r3(dir.x), r3(dir.y), r3(dir.z)];
+  if (g.mode === 'client') g.net.send({ t: 'shoot', o, d, w: it }); else doShoot(g.myId, o, d, it);
+}
+function doShoot(owner, o, d, itemId) {               // authority
+  const g = game, def = ITEMS[itemId];
+  if (!g || !def?.gun) return;
+  const cfg = IC[def.gun], origin = new THREE.Vector3(...o), dir = new THREE.Vector3(...d);
+  if (dir.lengthSq() < 1e-6) return;
+  dir.normalize();
+  const wr = g.physics.raycastRay(origin, dir, cfg.RANGE), wd = wr ? wr.dist : cfg.RANGE;
+  const ent = rayHitEntities(origin, dir, wd, owner);
+  let end;
+  if (ent) {
+    end = origin.clone().addScaledVector(dir, ent.dist);
+    deliverHit(ent.kind, ent.id, [dir.x, dir.y, dir.z], cfg.DAMAGE, origin);
+  } else if (wr) {
+    end = new THREE.Vector3(wr.point.x, wr.point.y, wr.point.z);
+    const p = propAt(wr);
+    if (p) g.physics.knockProp(p.id, dir, cfg.KNOCK);   // small shove
+  } else end = origin.clone().addScaledVector(dir, wd);
+  g.net?.broadcast({ t: 'shot', by: owner, e: [r3(end.x), r3(end.y), r3(end.z)] });
+  if (owner !== g.myId) shotFx(owner, end);
+}
+function shotFx(by, end) {                            // somebody else fired: flash at the tip of the item in their hand
+  const g = game, r = g.remote.map.get(by);
+  if (!r || !r.av.itemTip(_tip2)) return;
+  const dir = new THREE.Vector3().subVectors(end, _tip2).normalize();
+  _tip2.addScaledVector(dir, 0.07);
+  g.effects.muzzle(_tip2, 0.45); g.effects.tracer(_tip2, end);
+  audio.play('shoot', { at: _tip2 });
 }
 
 // --- physics gun
@@ -308,34 +422,55 @@ function updateGrab() {
   if (g.mode === 'client') g.grabTarget = t; else g.physics.setGrabTarget(0, t);
 }
 
-// --- glue
-function selectGlue(prop) {
+// --- glue + hinge share the two-click flow
+function selectJoint(kind, prop, pt) {
   const g = game, helper = new THREE.BoxHelper(prop.mesh, 0x66ccff);
   g.group.add(helper);
-  g.glueSel = { prop, helper };
+  g.jointSel = { kind, prop, helper, point: [pt.x, pt.y, pt.z] };
 }
-function clearGlueSel() {
-  const g = game; if (!g?.glueSel) return;
-  g.group.remove(g.glueSel.helper); g.glueSel.helper.dispose?.(); g.glueSel = null;
+function clearJointSel() {
+  const g = game; if (!g?.jointSel) return;
+  g.group.remove(g.jointSel.helper); g.jointSel.helper.dispose?.(); g.jointSel = null;
 }
-function glueClick() {
-  const g = game, p = propAt(aim(IC.GLUE_REACH).hit);
-  if (!p) { ui.toast('aim at a prop'); return; }
-  if (!g.glueSel) { selectGlue(p); audio.play('click'); ui.toast('now pick the second prop'); return; }
-  if (g.glueSel.prop.id === p.id) { ui.toast('pick a different prop'); return; }
-  const a = g.glueSel.prop.id;
-  clearGlueSel();
-  audio.play('glue');
-  if (g.mode === 'client') g.net.send({ t: 'glue', a, b: p.id });
-  else ui.toast(g.physics.glue(a, p.id) ? 'glued' : 'those are already glued');
+function jointClick(kind) {
+  const g = game, reach = kind === 'hinge' ? IC.HINGE.REACH : IC.GLUE_REACH;
+  const { hit } = aim(reach), p = propAt(hit);
+  if (!g.jointSel) {
+    if (!p) { ui.toast('aim at a prop'); return; }
+    selectJoint(kind, p, hit.point); audio.play('click');
+    ui.toast(kind === 'hinge' ? 'now click where the second prop (or a wall) meets it' : 'now pick the second prop');
+    return;
+  }
+  const a = g.jointSel.prop.id, p1 = g.jointSel.point;
+  if (kind === 'glue') {
+    if (!p) { ui.toast('aim at a prop'); return; }
+    if (p.id === a) { ui.toast('pick a different prop'); return; }
+    clearJointSel(); audio.play('glue');
+    if (g.mode === 'client') g.net.send({ t: 'glue', a, b: p.id });
+    else ui.toast(g.physics.glue(a, p.id) ? 'glued' : 'those are already glued');
+  } else {
+    if (!hit) { ui.toast('aim at a prop or a wall'); return; }
+    if (p && p.id === a) { ui.toast('pick a different prop'); return; }
+    const b = p ? p.id : null, p2 = [hit.point.x, hit.point.y, hit.point.z];
+    clearJointSel(); audio.play('hinge');
+    if (g.mode === 'client') g.net.send({ t: 'hinge', a, b, p1, p2 });
+    else ui.toast(g.physics.hinge(a, b, p1, p2) || 'hinged');
+  }
 }
-function glueRight() {
+function jointRight() {
   const g = game;
-  if (g.glueSel) { clearGlueSel(); ui.toast('cancelled'); return; }
+  if (g.jointSel) { clearJointSel(); ui.toast('cancelled'); return; }
   const p = propAt(aim(IC.GLUE_REACH).hit);
   if (!p) return;
-  if (g.mode === 'client') { g.net.send({ t: 'unglue', id: p.id }); ui.toast('unglued'); }
-  else ui.toast(g.physics.unglue(p.id) ? 'unglued' : 'nothing glued to that');
+  if (g.mode === 'client') { g.net.send({ t: 'unglue', id: p.id }); ui.toast('joints removed'); }
+  else ui.toast(g.physics.unglue(p.id) ? 'joints removed' : 'nothing attached to that');
+}
+
+// ---------------------------------------------------------------- nextbot kills
+function killPerson(person) {
+  const g = game;
+  if (person.id === g.myId) g.player.damage(9999);
+  else { const c = g.net?.clients.get(person.id); if (c) g.net.sendTo(c, { t: 'hurt', dmg: 9999, d: [0, 1, 0] }); }
 }
 
 // ---------------------------------------------------------------- network handlers
@@ -347,7 +482,7 @@ const netHandlers = {
     return {
       map: g.map.id,
       players: [{ id: 0, name: g.name }, ...[...g.net.clients.values()].map(c => ({ id: c.id, name: c.name }))],
-      props: [...g.physics.props.values()].map(p => ({ id: p.id, key: p.key, a: p.active ? 1 : 0,
+      props: [...g.physics.props.values()].map(p => ({ id: p.id, key: p.key, a: p.active ? 1 : 0, d: p.data || null,
         p: [p.body.position.x, p.body.position.y, p.body.position.z],
         q: [p.body.quaternion.x, p.body.quaternion.y, p.body.quaternion.z, p.body.quaternion.w] })),
     };
@@ -360,7 +495,10 @@ const netHandlers = {
   },
   onSpawnReq(c, m) {
     const g = game; if (!g || typeof m.key !== 'string' || !okVec(m.p) || !Number.isFinite(m.yaw)) return;
-    if (!g.physics.spawnProp(m.key, m.p, m.yaw, { owner: c.id })) g.net.sendTo(c, { t: 'toast', msg: 'prop limit reached' });
+    const spec = getSpawnable(m.key); if (!spec) return;
+    if (spec.op || spec.dialog) { g.net.sendTo(c, { t: 'toast', msg: 'only the server owner can spawn that' }); return; }
+    const err = spawnLocal(g, m.key, m.p, m.yaw, c.id, null);
+    if (err) g.net.sendTo(c, { t: 'toast', msg: err });
   },
   onRemoveReq(c, m) { game?.physics.removeProp(m.id); },
   onClearReq() { game?.physics.clearProps(); },
@@ -368,15 +506,26 @@ const netHandlers = {
   onUseReq(c, m) {
     const g = game, p = g?.physics.props.get(m.id);
     if (!p) return;
-    if (p.spec.item) { g.physics.removeProp(m.id); g.net.sendTo(c, { t: 'give', item: p.spec.item }); }
-    else if (p.spec.thruster) g.physics.toggleThruster(m.id);
+    if (p.spec.item) {
+      if (p.spec.op) { g.net.sendTo(c, { t: 'toast', msg: 'only the server owner can pick that up' }); return; }
+      g.physics.removeProp(m.id); g.net.sendTo(c, { t: 'give', item: p.spec.item });
+    } else if (p.spec.thruster) g.physics.toggleThruster(m.id);
   },
   onGrabReq(c, m) { game?.physics.startGrab(c.id, m.id); },
   onGrabTarget(c, m) { if (okVec(m.p)) game?.physics.setGrabTarget(c.id, m.p); },
   onGrabRelease(c) { game?.physics.endGrab(c.id); },
   onMeleeReq(c, m) { if (game && okVec(m.d)) meleeProp(m.id, m.d); },
-  onHitReq(c, m) { if (game && okVec(m.d)) deliverHit(m.target, m.d); },
+  onHitReq(c, m) {
+    const g = game; if (!g || !okVec(m.d) || (m.kind !== 'npc' && m.kind !== 'player') || !Number.isFinite(m.target)) return;
+    const r = g.remote.map.get(c.id);
+    deliverHit(m.kind, m.target, m.d, IC.CROWBAR.DAMAGE, r ? r.av.group.position : null);   // damage comes from config, never from the client
+  },
+  onShootReq(c, m) { if (game && okVec(m.o) && okVec(m.d) && typeof m.w === 'string') doShoot(c.id, m.o, m.d, m.w); },
   onGlueReq(c, m) { const g = game; if (g && g.physics.glue(m.a, m.b)) g.net.sendTo(c, { t: 'toast', msg: 'glued' }); },
+  onHingeReq(c, m) {
+    const g = game; if (!g || !okVec(m.p1) || !okVec(m.p2) || !Number.isFinite(m.a) || !(m.b === null || Number.isFinite(m.b))) return;
+    g.net.sendTo(c, { t: 'toast', msg: g.physics.hinge(m.a, m.b, m.p1, m.p2) || 'hinged' });
+  },
   onUnglueReq(c, m) { game?.physics.unglue(m.id); },
 
   // ---- client side
@@ -386,14 +535,22 @@ const netHandlers = {
     for (const e of m.pl || []) {
       if (e[0] === g.myId) continue;
       if (!g.remote.map.has(e[0])) g.remote.add(e[0], g.names.get(e[0]) || 'player');
-      g.remote.push(e[0], { p: [e[1], e[2], e[3]], yaw: e[4], pitch: e[5], an: e[6], it: e[7] || null, gr: e[8] || 0 }, t);
+      g.remote.push(e[0], { p: [e[1], e[2], e[3]], yaw: e[4], pitch: e[5], an: e[6], it: e[7] || null, gr: e[8] || 0, tq: e[9] || null }, t);
     }
+    const seen = new Set();
+    for (const e of m.np || []) {
+      if (!Array.isArray(e)) continue;
+      seen.add(e[0]);
+      if (!g.npcView.map.has(e[0])) g.npcView.add(e[0], 'npc');
+      g.npcView.push(e[0], { p: [e[1], e[2], e[3]], yaw: e[4], pitch: 0, an: String(e[5]), it: e[6] || null, gr: 0, tq: null }, t);
+    }
+    for (const id of [...g.npcView.map.keys()]) if (!seen.has(id)) g.npcView.remove(id);
     g.physics.applyPropStates(m.pr, t);
     updateCount();
   },
   onSpawned(m) {
     const g = game; if (!g || g.mode !== 'client') return;
-    const p = g.physics.spawnProp(m.key, m.p, 0, { id: m.id, quat: m.q, owner: m.by, silent: true });
+    const p = g.physics.spawnProp(m.key, m.p, 0, { id: m.id, quat: okQuat(m.q) ? m.q : null, owner: m.by, silent: true, data: cleanRemoteData(m.d) });
     if (!p) return;
     handleSpawnFx(p);
     if (m.by === g.myId) g.myProps.push(m.id);
@@ -401,6 +558,7 @@ const netHandlers = {
   onRemoved(m) { game?.physics.removeProp(m.id, true); },
   onCleared() { if (game) { game.physics.clearProps(); game.myProps.length = 0; } },
   onBoom(m) { if (game && okVec(m.p)) handleExplosion({ x: m.p[0], y: m.p[1], z: m.p[2] }, m.ex); },
+  onShot(m) { const g = game; if (g && okVec(m.e) && m.by !== g.myId) shotFx(m.by, new THREE.Vector3(...m.e)); },
   onThruster(m) { game?.physics.setThruster(m.id, !!m.on); },
   onGive(m) { giveItem(m.item); },
   onHurt(m) { if (game && Number.isFinite(m.dmg) && okVec(m.d)) game.player.hurt(m.dmg, m.d); },
@@ -414,21 +572,22 @@ const netHandlers = {
 function lock() {
   try {
     const p = canvas.requestPointerLock();
-    if (p && p.catch) p.catch(() => ui.showLockHint(!!game && !game.paused));
+    if (p && p.catch) p.catch(() => ui.showLockHint(!!game && !game.paused && !game.modal));
   } catch (e) { ui.showLockHint(true); }
 }
 document.addEventListener('pointerlockchange', () => {
   locked = document.pointerLockElement === canvas;
-  ui.showLockHint(!!game && !locked && !game.paused && !game.spawnHeld);
-  if (game && !locked && !game.spawnHeld && !game.paused) pause();      // lost the lock (esc / alt-tab) -> pause menu
+  ui.showLockHint(!!game && !locked && !game.paused && !game.spawnHeld && !game.modal);
+  if (game && !locked) game.mouseDown = false;
+  if (game && !locked && !game.spawnHeld && !game.paused && !game.modal) pause();      // lost the lock (esc / alt-tab) -> pause menu
 });
-document.addEventListener('pointerlockerror', () => { if (game && !game.paused) ui.showLockHint(true); });
-canvas.addEventListener('click', () => { if (game && !game.paused && !locked && !game.spawnHeld) lock(); });
+document.addEventListener('pointerlockerror', () => { if (game && !game.paused && !game.modal) ui.showLockHint(true); });
+canvas.addEventListener('click', () => { if (game && !game.paused && !game.modal && !locked && !game.spawnHeld) lock(); });
 
 function pause() {
   if (!game || game.paused) return;
   grabEnd();
-  game.paused = true; keys.clear();
+  game.paused = true; game.mouseDown = false; keys.clear();
   ui.showLockHint(false); ui.showPause(true, game.code);
 }
 function resume() {
@@ -436,17 +595,17 @@ function resume() {
   game.paused = false; ui.showPause(false); lock();
 }
 function openSpawnMenu() {
-  const g = game; if (!g || g.paused || g.player.dead) return;
-  g.spawnHeld = true; ui.openSpawn(); document.exitPointerLock();
+  const g = game; if (!g || g.paused || g.modal || g.player.dead) return;
+  g.spawnHeld = true; g.mouseDown = false; ui.openSpawn(); document.exitPointerLock();
 }
 function closeSpawnMenu(relock = true) {
   const g = game; if (!g || !g.spawnHeld) return;
   g.spawnHeld = false; ui.closeSpawn();
-  if (relock && !g.paused) lock();
+  if (relock && !g.paused && !g.modal) lock();
 }
 
 addEventListener('keydown', e => {
-  if (!game) return;
+  if (!game || game.modal) return;
   if (game.paused) { if (e.code === 'Escape') resume(); return; }
   if (keyIs(e.code, 'help')) { e.preventDefault(); if (!e.repeat) ui.toggleHelp(); return; }
   if (!locked && !game.spawnHeld) return;
@@ -464,18 +623,18 @@ addEventListener('keyup', e => {
   keys.delete(e.code);
   if (game?.spawnHeld && keyIs(e.code, 'spawnMenu')) closeSpawnMenu();
 });
-addEventListener('blur', () => { keys.clear(); closeSpawnMenu(false); });
+addEventListener('blur', () => { keys.clear(); if (game) game.mouseDown = false; closeSpawnMenu(false); });
 document.addEventListener('mousemove', e => {
   if (locked && game && !game.paused) game.player.look(e.movementX, e.movementY, 0.0022 * ui.settings.sens);
 });
 addEventListener('mousedown', e => {
-  if (!locked || !game || game.paused) return;
-  if (e.button === 0) primaryDown(); else if (e.button === 2) secondaryDown();
+  if (!locked || !game || game.paused || game.modal) return;
+  if (e.button === 0) { game.mouseDown = true; primaryDown(); } else if (e.button === 2) secondaryDown();
 });
-addEventListener('mouseup', e => { if (e.button === 0 && game?.grab) grabEnd(); });
+addEventListener('mouseup', e => { if (e.button === 0 && game) { game.mouseDown = false; if (game.grab) grabEnd(); } });
 addEventListener('contextmenu', e => { if (game) e.preventDefault(); });
 addEventListener('wheel', e => {
-  if (!game || game.paused || !locked) return;
+  if (!game || game.paused || game.modal || !locked) return;
   e.preventDefault();
   const dir = Math.sign(e.deltaY);
   if (game.grab) game.grab.dist = clamp(game.grab.dist - dir, IC.PHYSGUN.MIN_DIST, IC.PHYSGUN.MAX_DIST);   // physgun: scroll = distance
@@ -499,7 +658,7 @@ ui.init({
   onResume: resume,
   onExit() { endSession(); ui.showTitle(); },
   onSettings() { camera.fov = ui.settings.fov; camera.updateProjectionMatrix(); audio.setVolume(ui.settings.volume); },
-  onSpawnItem(id) { requestSpawn(id); },
+  onSpawnItem(id) { const spec = getSpawnable(id); if (spec?.dialog === 'nextbot') openNextbotDialog(id); else requestSpawn(id); },
   onClearAll() { clearAll(); },
   onLockClick() { lock(); },
 });
@@ -532,10 +691,13 @@ function updateBeams(t) {
 function updatePrompt() {
   const g = game;
   let text = null;
-  if (locked && !g.paused && !g.spawnHeld && !g.player.dead) {
+  if (locked && !g.paused && !g.modal && !g.spawnHeld && !g.player.dead) {
     const t = interactTarget(), k = ui.keyLabels('use');
     if (g.player.seat) text = t?.kind === 'thruster' ? `[${k}] toggle thruster` : `[${k}] stand up`;
-    else if (t) text = t.kind === 'item' ? `[${k}] pick up ${ITEMS[t.prop.spec.item].name}` : t.kind === 'seat' ? `[${k}] sit` : `[${k}] toggle thruster`;
+    else if (t) {
+      if (t.kind === 'item') text = t.prop.spec.op && g.mode === 'client' ? `${ITEMS[t.prop.spec.item].name} (server owner only)` : `[${k}] pick up ${ITEMS[t.prop.spec.item].name}`;
+      else text = t.kind === 'seat' ? `[${k}] sit` : `[${k}] toggle thruster`;
+    }
   }
   ui.setPrompt(text);
 }
@@ -543,11 +705,16 @@ function updatePrompt() {
 function update(dt) {
   const g = game, t = now();
   const sim = !(g.paused && g.mode === 'sp');      // singleplayer pause freezes the world, multiplayer cannot
-  g.crowbarCd = Math.max(0, g.crowbarCd - dt);
+  g.crowbarCd = Math.max(0, g.crowbarCd - dt); g.gunCd = Math.max(0, g.gunCd - dt);
   if (sim) {
-    g.player.update(dt, keys, locked && !g.paused);
+    g.player.update(dt, keys, locked && !g.paused && !g.modal);
+    if (g.npcs) {                                       // npc + nextbot ai (authority only)
+      const ppl = people();
+      g.npcs.update(dt, ppl);
+      updateNextbots(g.physics, dt, ppl, g.npcs, killPerson, (n, from) => g.npcs.hurt(n.id, 9999, { x: 0, y: 1, z: 0 }, from));
+    }
     g.physics.step(dt);
-    if (g.mode === 'client') g.physics.updateClient(t - NET.INTERP_DELAY);
+    if (g.mode === 'client') { g.physics.updateClient(t - NET.INTERP_DELAY); g.npcView.update(dt, t - NET.INTERP_DELAY); }
     g.remote.update(dt, t - NET.INTERP_DELAY);
     if (g.mode === 'host') for (const [id, r] of g.remote.map) g.physics.moveRemoteBody(id, r.av.group.position, dt);
   }
@@ -562,9 +729,10 @@ function update(dt) {
 
   const b = g.player.body, hs = Math.hypot(b.velocity.x, b.velocity.z);
   g.vm.update(dt, g.player.grounded ? hs : 0, !g.player.dead);
+  if (g.mouseDown && locked && !g.paused && !g.modal && ITEMS[g.inv.current]?.gun) gunFire();
   updateGrab();
   updateBeams(t);
-  if (g.glueSel) { if (!g.physics.props.has(g.glueSel.prop.id)) clearGlueSel(); else g.glueSel.helper.update(); }
+  if (g.jointSel) { if (!g.physics.props.has(g.jointSel.prop.id)) clearJointSel(); else g.jointSel.helper.update(); }
   updatePrompt();
 
   // sun follows the player so shadows stay sharp
@@ -583,14 +751,14 @@ function update(dt) {
       g.tickAcc = 0;
       const me = g.player.netState(), it = g.inv.current || '', gr = g.grab ? g.grab.id : 0;
       if (g.mode === 'host') {
-        const pl = [[0, r3(me.p[0]), r3(me.p[1]), r3(me.p[2]), r3(me.yaw), r3(me.pitch), me.an, it, gr]];
+        const pl = [[0, r3(me.p[0]), r3(me.p[1]), r3(me.p[2]), r3(me.yaw), r3(me.pitch), me.an, it, gr, me.tq]];
         for (const c of g.net.clients.values()) {
           const s = c.state; if (!s) continue;
-          pl.push([c.id, r3(s.p[0]), r3(s.p[1]), r3(s.p[2]), r3(s.yaw), r3(s.pitch), String(s.an), (typeof s.it === 'string' && ITEMS[s.it]) ? s.it : '', Number.isInteger(s.gr) ? s.gr : 0]);
+          pl.push([c.id, r3(s.p[0]), r3(s.p[1]), r3(s.p[2]), r3(s.yaw), r3(s.pitch), String(s.an), (typeof s.it === 'string' && ITEMS[s.it]) ? s.it : '', Number.isInteger(s.gr) ? s.gr : 0, okQuat(s.tq) ? s.tq : null]);
         }
-        g.net.broadcast({ t: 'snap', pl, pr: g.physics.collectDelta() });
+        g.net.broadcast({ t: 'snap', pl, np: g.npcs.snapshot(), pr: g.physics.collectDelta() });
       } else if (g.mode === 'client') {
-        g.net.send({ t: 'st', p: me.p.map(r3), yaw: r3(me.yaw), pitch: r3(me.pitch), an: me.an, it, gr });
+        g.net.send({ t: 'st', p: me.p.map(r3), yaw: r3(me.yaw), pitch: r3(me.pitch), an: me.an, it, gr, tq: me.tq });
         if (g.grab && g.grabTarget) g.net.send({ t: 'gt', p: g.grabTarget.map(r3) });
         if (t - g.net.lastRecv > NET.HOST_TIMEOUT) netHandlers.onDisconnect('lost connection to the host');
       }

@@ -2,15 +2,84 @@
 // (kinematic bodies driven by snapshots) so the client player can still stand on / bump into them.
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
-import { PLAYER, GROUPS, LIMITS } from './config.js';
+import { PLAYER, GROUPS, LIMITS, ITEMS_CFG as IC, NEXTBOT } from './config.js';
 import { getSpawnable } from './spawnables.js';
 import { cloneModel, makePlaceholder } from './assets.js';
 import { buildItemModel } from './items.js';
 import { SnapshotBuffer } from './interp.js';
+import { safeImageUrl, loadImage } from './imgutil.js';
 
 const r3 = v => Math.round(v * 1000) / 1000;
 const UP = new THREE.Vector3(0, 1, 0);
 
+// ---------------------------------------------------------------- nextbot sprite
+function questionTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const x = c.getContext('2d');
+  x.fillStyle = '#7a1020'; x.fillRect(0, 0, 128, 128);
+  x.fillStyle = '#fff'; x.font = 'bold 96px sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText('?', 64, 70);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function nextbotSprite(data) {
+  const mat = new THREE.SpriteMaterial({ map: questionTexture(), transparent: true, alphaTest: 0.02 });
+  const s = new THREE.Sprite(mat);
+  s.scale.set(NEXTBOT.SIZE, NEXTBOT.SIZE, 1);
+  s.position.y = NEXTBOT.SIZE / 2 - 0.6;          // sprite bottom sits on the ground under the 0.6 radius body
+  if (safeImageUrl(data?.url)) {
+    loadImage(data.url).then(img => {
+      const t = new THREE.Texture(img); t.colorSpace = THREE.SRGBColorSpace; t.needsUpdate = true;
+      mat.map = t; mat.needsUpdate = true;
+      const aspect = Math.max(0.3, Math.min(3, (img.naturalWidth / img.naturalHeight) || 1));
+      s.scale.set(NEXTBOT.SIZE * aspect, NEXTBOT.SIZE, 1);
+    }).catch(() => { /* keeps the ? texture */ });
+  }
+  return s;
+}
+
+// ---------------------------------------------------------------- visuals (also used for the spawn menu previews)
+export function buildVisual(spec, data = null) {
+  const holder = new THREE.Group();
+  if (spec.nextbot) { holder.add(nextbotSprite(data)); return holder; }
+  if (spec.item) {                                   // inventory items: auto-fitted model (or procedural), lying flat
+    const m = buildItemModel(spec.item);
+    m.rotation.z = Math.PI / 2;
+    holder.add(m);
+    return holder;
+  }
+  const inst = spec.glb ? cloneModel(spec.glb) : null;
+  if (inst) {
+    const o = inst.object;
+    o.scale.multiplyScalar(spec.scale ?? 1);
+    holder.add(o);
+    holder.updateMatrixWorld(true);
+    const c = new THREE.Box3().setFromObject(holder).getCenter(new THREE.Vector3());
+    o.position.sub(c);                               // center the model on the physics body
+    o.traverse(m => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
+  } else {
+    holder.add(makePlaceholder({ shape: spec.shape, size: spec.size, color: spec.color, label: spec.name }));
+  }
+  if (spec.thruster) {
+    const dir = new THREE.Vector3(...spec.thruster.dir).normalize();
+    const ext = Math.abs(dir.x) * spec.size[0] + Math.abs(dir.y) * spec.size[1] + Math.abs(dir.z || 0) * (spec.size[2] ?? 0);
+    if (!inst) {                                     // arrow so you can see which way a placeholder pushes
+      const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 12), new THREE.MeshBasicMaterial({ color: 0x4de1ff }));
+      arrow.quaternion.setFromUnitVectors(UP, dir);
+      arrow.position.copy(dir).multiplyScalar(ext + 0.11);
+      holder.add(arrow);
+    }
+    const flame = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.7, 10),
+      new THREE.MeshBasicMaterial({ color: 0xff9a2e, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
+    flame.quaternion.setFromUnitVectors(UP, dir.clone().negate());   // apex points away from the nozzle
+    flame.position.copy(dir).multiplyScalar(-(ext + 0.35));
+    flame.visible = false;
+    holder.add(flame);
+    holder.userData.flame = flame;
+  }
+  return holder;
+}
+
+// ---------------------------------------------------------------- world
 export class Physics {
   constructor(group, isAuthority) {
     this.group = group;
@@ -20,7 +89,7 @@ export class Physics {
     this.remote = new Map();    // host only: kinematic bodies for remote players so they can push props
     this.timers = [];           // {t, id} fuses + chain reactions
     this.grabs = new Map();     // physgun: owner id -> {id, target:[x,y,z]}
-    this.glues = [];            // {a, b, c}
+    this.joints = [];           // {kind:'glue'|'hinge', a, b|null, c, anchor|null}
     this.nextId = 1;
     this._v = new CANNON.Vec3();
 
@@ -53,7 +122,7 @@ export class Physics {
     this.world.addBody(b);
   }
 
-  // two spheres stacked = cheap capsule. body origin is at the player's FEET.
+  // two spheres stacked = cheap capsule. body origin is at the player's FEET. (npcs use this too)
   createPlayerBody() {
     const b = new CANNON.Body({ mass: 80, material: this.playerMat, fixedRotation: true, linearDamping: 0.01, allowSleep: false,
       collisionFilterGroup: GROUPS.PLAYER, collisionFilterMask: GROUPS.WORLD | GROUPS.PROP });
@@ -63,6 +132,7 @@ export class Physics {
     this.world.addBody(b);
     return b;
   }
+  removeBody(b) { this.world.removeBody(b); }
 
   addRemoteBody(id) {
     if (this.remote.has(id)) return;
@@ -99,50 +169,10 @@ export class Physics {
   }
 
   // ---- props ----
-  _visual(spec) {
-    const holder = new THREE.Group();
-    if (spec.item) {                                   // inventory items: auto-fitted model (or procedural), lying flat
-      const m = buildItemModel(spec.item);
-      m.rotation.z = Math.PI / 2;
-      holder.add(m);
-    } else {
-      const inst = spec.glb ? cloneModel(spec.glb) : null;
-      if (inst) {
-        const o = inst.object;
-        o.scale.multiplyScalar(spec.scale ?? 1);
-        holder.add(o);
-        holder.updateMatrixWorld(true);
-        const c = new THREE.Box3().setFromObject(holder).getCenter(new THREE.Vector3());
-        o.position.sub(c);                             // center the model on the physics body
-        o.traverse(m => { if (m.isMesh) { m.castShadow = true; m.receiveShadow = true; } });
-      } else {
-        holder.add(makePlaceholder({ shape: spec.shape, size: spec.size, color: spec.color, label: spec.name }));
-      }
-      if (spec.thruster) {
-        const dir = new THREE.Vector3(...spec.thruster.dir).normalize();
-        const ext = Math.abs(dir.x) * spec.size[0] + Math.abs(dir.y) * spec.size[1] + Math.abs(dir.z || 0) * (spec.size[2] ?? 0);
-        if (!inst) {                                   // arrow so you can see which way a placeholder pushes
-          const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.22, 12), new THREE.MeshBasicMaterial({ color: 0x4de1ff }));
-          arrow.quaternion.setFromUnitVectors(UP, dir);
-          arrow.position.copy(dir).multiplyScalar(ext + 0.11);
-          holder.add(arrow);
-        }
-        const flame = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.7, 10),
-          new THREE.MeshBasicMaterial({ color: 0xff9a2e, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
-        flame.quaternion.setFromUnitVectors(UP, dir.clone().negate());   // apex points away from the nozzle
-        flame.position.copy(dir).multiplyScalar(-(ext + 0.35));
-        flame.visible = false;
-        holder.add(flame);
-        holder.userData.flame = flame;
-      }
-    }
-    return holder;
-  }
-
-  // opts: { id, owner, quat:[x,y,z,w], silent }
+  // opts: { id, owner, quat:[x,y,z,w], silent, data }
   spawnProp(key, pos, yaw = 0, opts = {}) {
     const spec = getSpawnable(key);
-    if (!spec) { console.warn(`[physics] unknown spawnable: ${key}`); return null; }
+    if (!spec || spec.npc) { console.warn(`[physics] cannot spawn as prop: ${key}`); return null; }
     if (this.isAuthority && this.props.size >= LIMITS.MAX_PROPS) return null;
     const id = opts.id ?? this.nextId++;
     if (id >= this.nextId) this.nextId = id + 1;
@@ -152,22 +182,24 @@ export class Physics {
       mass: this.isAuthority ? spec.mass : 0,
       material: spec.bouncy ? this.bouncyMat : this.propMat,
       linearDamping: 0.05, angularDamping: 0.25,
-      allowSleep: true, sleepSpeedLimit: 0.2, sleepTimeLimit: 1,
+      allowSleep: !spec.nextbot, sleepSpeedLimit: 0.2, sleepTimeLimit: 1,
+      fixedRotation: !!spec.nextbot,                  // nextbots never tumble (their sprite is an offset billboard)
       collisionFilterGroup: GROUPS.PROP,
       collisionFilterMask: GROUPS.WORLD | GROUPS.PROP | GROUPS.REMOTE | GROUPS.PLAYER,
     });
     body.addShape(spec.shape === 'sphere' ? new CANNON.Sphere(spec.size[0]) : new CANNON.Box(new CANNON.Vec3(...spec.size)));
     body.position.set(pos[0], pos[1], pos[2]);
-    if (opts.quat) body.quaternion.set(...opts.quat); else body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), yaw);
+    if (opts.quat && !spec.nextbot) body.quaternion.set(...opts.quat); else body.quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), spec.nextbot ? 0 : yaw);
+    if (spec.nextbot) body.updateMassProperties();
     body.propId = id;
 
-    const mesh = this._visual(spec);
+    const mesh = buildVisual(spec, opts.data || null);
     mesh.position.copy(body.position); mesh.quaternion.copy(body.quaternion);
     this.group.add(mesh);
     this.world.addBody(body);
 
-    const prop = { id, key, spec, body, mesh, owner: opts.owner ?? 0, buf: new SnapshotBuffer(), sentSleep: false, chained: false,
-      active: false, flame: mesh.userData.flame || null };
+    const prop = { id, key, spec, body, mesh, owner: opts.owner ?? 0, data: opts.data || null, buf: new SnapshotBuffer(),
+      sentSleep: false, chained: false, active: false, flame: mesh.userData.flame || null };
     this.props.set(id, prop);
 
     if (this.isAuthority && spec.explosive) {
@@ -194,8 +226,8 @@ export class Physics {
     return true;
   }
   clearProps() {
-    for (const g of this.glues) this.world.removeConstraint(g.c);
-    this.glues = []; this.grabs.clear();
+    for (const j of this.joints) this._dropJoint(j);
+    this.joints = []; this.grabs.clear();
     for (const id of [...this.props.keys()]) this.removeProp(id, true);
     this.timers.length = 0;
     this.hooks.onClear?.();
@@ -223,22 +255,63 @@ export class Physics {
   setGrabTarget(owner, t) { const g = this.grabs.get(owner); if (g) g.target = t; }
   endGrab(owner) { this.grabs.delete(owner); }
 
+  // ---- joints ----
+  _dropJoint(j) {
+    this.world.removeConstraint(j.c);
+    if (j.anchor) this.world.removeBody(j.anchor);
+  }
+
   glue(a, b) {
     if (!this.isAuthority || a === b) return false;
     const pa = this.props.get(a), pb = this.props.get(b);
     if (!pa || !pb) return false;
-    if (this.glues.some(g => (g.a === a && g.b === b) || (g.a === b && g.b === a))) return false;
+    if (this.joints.some(g => g.kind === 'glue' && ((g.a === a && g.b === b) || (g.a === b && g.b === a)))) return false;
     const c = new CANNON.LockConstraint(pa.body, pb.body, { collideConnected: false });
     this.world.addConstraint(c);
-    this.glues.push({ a, b, c });
+    this.joints.push({ kind: 'glue', a, b, c, anchor: null });
     pa.body.wakeUp(); pb.body.wakeUp();
     return true;
   }
+
+  // door-style hinge (vertical axis). p1/p2 = the two points the player aimed at: they must be close together.
+  // bId = null pins prop a to the world. returns null on success or an error string.
+  hinge(a, bId, p1, p2) {
+    if (!this.isAuthority) return 'only the host can do that';
+    const pa = this.props.get(a), pb = bId == null ? null : this.props.get(bId);
+    if (!pa || (bId != null && !pb)) return 'that prop is gone';
+    if (a === bId) return 'pick a different prop';
+    const gap = Math.hypot(p1[0] - p2[0], p1[1] - p2[1], p1[2] - p2[2]);
+    if (!(gap <= IC.HINGE.MAX_GAP)) return 'too far apart. move the props closer together';
+    const mid = new CANNON.Vec3((p1[0] + p2[0]) / 2, (p1[1] + p2[1]) / 2, (p1[2] + p2[2]) / 2);
+    if (mid.distanceTo(pa.body.position) > 8 || (pb && mid.distanceTo(pb.body.position) > 8)) return 'hinge point is not on those props';
+
+    let anchor = null, bodyB = pb?.body;
+    if (!bodyB) {                                   // pin to the world with an invisible static anchor
+      anchor = new CANNON.Body({ mass: 0 });
+      anchor.position.copy(mid);
+      this.world.addBody(anchor);
+      bodyB = anchor;
+    }
+    const axis = new CANNON.Vec3(0, 1, 0);
+    const local = body => body.pointToLocalFrame(mid, new CANNON.Vec3());
+    const localAxis = body => body.quaternion.inverse().vmult(axis, new CANNON.Vec3());
+    const c = new CANNON.HingeConstraint(pa.body, bodyB, {
+      pivotA: local(pa.body), axisA: localAxis(pa.body),
+      pivotB: local(bodyB), axisB: localAxis(bodyB),
+      collideConnected: false,
+    });
+    this.world.addConstraint(c);
+    this.joints.push({ kind: 'hinge', a, b: bId ?? null, c, anchor });
+    pa.body.wakeUp(); pb?.body.wakeUp();
+    return null;
+  }
+
+  // remove every glue/hinge touching this prop
   unglue(id) {
     const keep = [];
-    for (const g of this.glues) { if (g.a === id || g.b === id) this.world.removeConstraint(g.c); else keep.push(g); }
-    const changed = keep.length !== this.glues.length;
-    this.glues = keep;
+    for (const j of this.joints) { if (j.a === id || j.b === id) this._dropJoint(j); else keep.push(j); }
+    const changed = keep.length !== this.joints.length;
+    this.joints = keep;
     return changed;
   }
 
@@ -291,9 +364,10 @@ export class Physics {
       p.body.wakeUp();
       p.body.applyForce(V);
     }
-    for (const g of this.glues) {                          // never let half a glued pair fall asleep
-      const a = this.props.get(g.a)?.body, b = this.props.get(g.b)?.body;
-      if (!a || !b) continue;
+    for (const j of this.joints) {                         // never let half a joined pair fall asleep
+      const a = this.props.get(j.a)?.body, b = j.b != null ? this.props.get(j.b)?.body : null;
+      if (!a) continue;
+      if (!b) { if (a.sleepState === CANNON.Body.SLEEPING && j.kind === 'hinge') { /* door at rest, fine */ } continue; }
       if (a.sleepState === CANNON.Body.SLEEPING && b.sleepState !== CANNON.Body.SLEEPING) a.wakeUp();
       else if (b.sleepState === CANNON.Body.SLEEPING && a.sleepState !== CANNON.Body.SLEEPING) b.wakeUp();
     }

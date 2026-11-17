@@ -1,5 +1,6 @@
-// network.js - peerjs, host-authoritative. host = source of truth for props/explosions.
+// network.js - peerjs, host-authoritative. host = source of truth for props/explosions/npcs.
 // players own their own movement and hp (not cheat-proof, see notes).
+import * as THREE from 'three';
 import { NET, PLAYER } from './config.js';
 import { Avatar } from './player.js';
 import { SnapshotBuffer } from './interp.js';
@@ -101,7 +102,9 @@ export class Net {
       case 'rel': h.onGrabRelease(c, m); break;
       case 'melee': h.onMeleeReq(c, m); break;
       case 'hit': h.onHitReq(c, m); break;
+      case 'shoot': h.onShootReq(c, m); break;
       case 'glue': h.onGlueReq(c, m); break;
+      case 'hinge': h.onHingeReq(c, m); break;
       case 'unglue': h.onUnglueReq(c, m); break;
     }
   }
@@ -154,6 +157,7 @@ export class Net {
       case 'removed': h.onRemoved(m); break;
       case 'cleared': h.onCleared(m); break;
       case 'boom': h.onBoom(m); break;
+      case 'shot': h.onShot(m); break;
       case 'thr': h.onThruster(m); break;
       case 'give': h.onGive(m); break;
       case 'hurt': h.onHurt(m); break;
@@ -173,7 +177,10 @@ export class Net {
   }
 }
 
-// ---------------------------------------------------------------- remote players
+// ---------------------------------------------------------------- remote avatars (other players, and npcs on clients)
+const _qy = new THREE.Quaternion(), AXIS_Y = new THREE.Vector3(0, 1, 0);
+const okQuat = q => Array.isArray(q) && q.length === 4 && q.every(Number.isFinite);
+
 export class RemotePlayers {
   constructor(parent) { this.parent = parent; this.map = new Map(); }
 
@@ -186,7 +193,7 @@ export class RemotePlayers {
   remove(id) { const r = this.map.get(id); if (r) { r.av.dispose(); this.map.delete(id); } }
   push(id, st, t) {
     const r = this.map.get(id);
-    if (r) r.buf.push(t, st.p, null, { yaw: st.yaw, pitch: st.pitch, state: st.an, item: typeof st.it === 'string' ? st.it : null, grab: Number.isInteger(st.gr) ? st.gr : 0 });
+    if (r) r.buf.push(t, st.p, okQuat(st.tq) ? st.tq : null, { yaw: st.yaw, pitch: st.pitch, state: st.an, item: typeof st.it === 'string' ? st.it : null, grab: Number.isInteger(st.gr) ? st.gr : 0 });
   }
 
   update(dt, renderTime) {
@@ -194,7 +201,9 @@ export class RemotePlayers {
       const s = r.buf.sample(renderTime);
       if (!s) continue;
       r.av.group.position.set(s.p[0], s.p[1], s.p[2]);
-      r.av.group.rotation.y = s.ex.yaw + PLAYER.MODEL_YAW_OFFSET;
+      _qy.setFromAxisAngle(AXIS_Y, s.ex.yaw + PLAYER.MODEL_YAW_OFFSET);
+      if (s.q) r.av.group.quaternion.set(s.q[0], s.q[1], s.q[2], s.q[3]).multiply(_qy);   // sitting in a tipped chair: tip with it
+      else r.av.group.quaternion.copy(_qy);
       r.av.setState(s.ex.state);
       r.av.holdItem(s.ex.item);
       r.grab = s.ex.grab;

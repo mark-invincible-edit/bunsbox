@@ -27,6 +27,9 @@ export const PLAYER = {
   STRIP_ROOT_MOTION: true,     // drops hips position tracks so mixamo clips do not drift
   DEAD_Y_OFFSET: -0.8,         // how far the model sinks while the dead animation plays (tweak me)
   SIT_DROP: 0.4,               // how far the model/camera drop when sitting in a chair
+  BHOP_GAIN: 0.1,              // speed bonus added per chained hop (hold jump while moving)
+  BHOP_MAX: 0.8,               // max bonus (0.8 = +80% speed)
+  BHOP_DECAY: 2.5,             // bonus lost per second when you stop hopping
 };
 
 // item + interaction tuning
@@ -35,7 +38,21 @@ export const ITEMS_CFG = {
   GLUE_REACH: 15,
   CROWBAR: { DAMAGE: 25, REACH: 3, COOLDOWN: 0.45, KNOCK: 160 },   // knock = impulse, speed gained = knock / mass (capped)
   PHYSGUN: { REACH: 25, MIN_DIST: 1.5, MAX_DIST: 25 },
+  GUN: { DAMAGE: 12, KNOCK: 40, COOLDOWN: 0.16, RANGE: 80 },        // knock is small on purpose
+  SUPERGUN: { DAMAGE: 80, KNOCK: 420, COOLDOWN: 0.07, RANGE: 120 }, // OP item
+  HINGE: { REACH: 10, MAX_GAP: 1.6 },                               // props must be this close (meters) to hinge
 };
+
+export const NPC = {
+  MAX: 12, HP: 100,
+  WALK: 3.0, RUN: 6.8,
+  LOOK_DIST: 7,        // starts looking at you inside this range
+  ITEM_SEE: 9,         // sees + walks to items inside this range
+  ITEM_PICK: 1.0,
+  TURN: 7,             // turn speed: higher = snappier (exponential ease out)
+};
+
+export const NEXTBOT = { SPEED_MIN: 1, SPEED_MAX: 20, SPEED_DEFAULT: 6, CATCH: 1.2, SIZE: 2.4 };
 
 export const NET = {
   TICK_RATE: 20,            // snapshots per second
@@ -80,5 +97,5 @@ export const TEXTURE_FILES = [
 export const SOUND_NAMES = [
   'footstep_grass', 'footstep_concrete', 'footstep_metal', 'footstep_rock', 'footstep_wood',
   'jump', 'land', 'spawn', 'explosion', 'click', 'wind',
-  'swing', 'hit', 'pickup', 'glue', 'thruster',
+  'swing', 'hit', 'pickup', 'glue', 'thruster', 'shoot', 'hinge',
 ];

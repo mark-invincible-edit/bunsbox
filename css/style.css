@@ -113,3 +113,15 @@ progress { width: min(420px, 80vw); height: 14px; accent-color: var(--acc); }
 @keyframes grid { to { background-position: 0 0, 56px 56px, 56px 56px, 0 0; } }
 @keyframes hurt { 0% { opacity: 1; } 100% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+/* spawn menu 3d previews */
+.item img { width: 72px; height: 72px; border-radius: 12px; border: 2px solid rgba(255,255,255,.22); object-fit: cover; background: #6e737b; transition: transform .2s var(--ease); }
+.item:hover img { transform: rotate(-4deg) scale(1.08); }
+
+/* nextbot dialog */
+#nb .panel { width: min(460px, 92vw); }
+#nb-preview { height: 150px; display: grid; place-items: center; border: 2px dashed var(--line); border-radius: 12px; background: #101216; overflow: hidden; color: var(--dim); }
+#nb-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+#nb-status { min-height: 1.4em; margin: 0; color: var(--dim); }
+#nb-status.ok { color: var(--ok); }
+#nb-status.err { color: var(--danger); }
+#nb output { color: var(--acc); font-weight: 700; }

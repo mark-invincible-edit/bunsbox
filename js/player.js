@@ -1,4 +1,4 @@
-// player.js - local first-person controller + the animated avatar used for remote players.
+// player.js - local first-person controller + the animated avatar used for remote players and npcs.
 import * as THREE from 'three';
 import * as CANNON from 'cannon-es';
 import { keyHeld, PLAYER, ANIMS, ONE_SHOT, PLAYER_MODEL, GROUPS } from './config.js';
@@ -107,7 +107,10 @@ export class Avatar {
 }
 
 // ---------------------------------------------------------------- local player
-const _v = new THREE.Vector3();
+const _v = new THREE.Vector3(), _e = new THREE.Euler();
+const _qa = new THREE.Quaternion(), _qb = new THREE.Quaternion();
+const AXIS_Y = new THREE.Vector3(0, 1, 0), AXIS_X = new THREE.Vector3(1, 0, 0);
+
 export class LocalPlayer {
   constructor(physics, camera) {
     this.physics = physics; this.camera = camera;
@@ -118,7 +121,9 @@ export class LocalPlayer {
     this.knockback = false; this.knockTime = 0;
     this.state = 'idle'; this.surface = 'concrete'; this.stepTimer = 0;
     this.eye = PLAYER.EYE; this.roll = 0;
-    this.seat = null;                   // {prop, t} while sitting
+    this.seat = null;                   // {prop, t, lastYaw} while sitting
+    this.tilt = new THREE.Quaternion(); // chair rotation without its heading: makes you tip over with the chair
+    this.bhop = 0; this.sinceLand = 1;
     this.onRespawn = null; this.onHurt = null; this.onDeath = null;
   }
 
@@ -126,7 +131,7 @@ export class LocalPlayer {
     const b = this.body;
     this.unseat(true);
     b.position.set(pt[0], pt[1], pt[2]); b.velocity.set(0, 0, 0);
-    this.hp = PLAYER.MAX_HP; this.dead = false; this.knockback = false; this.fallSpeed = 0; this.airTime = 0;
+    this.hp = PLAYER.MAX_HP; this.dead = false; this.knockback = false; this.fallSpeed = 0; this.airTime = 0; this.bhop = 0;
   }
 
   look(dx, dy, sens) {
@@ -140,9 +145,9 @@ export class LocalPlayer {
     this.hp = Math.max(0, this.hp - n);
     if (this.hp <= 0) this._die();
   }
-  _die() { this.dead = true; this.deathTimer = PLAYER.RESPAWN_DELAY; this.knockback = false; this.onDeath?.(); }
+  _die() { this.dead = true; this.deathTimer = PLAYER.RESPAWN_DELAY; this.knockback = false; this.bhop = 0; this.onDeath?.(); }
 
-  // melee etc: damage + a little shove. dir = [x,y,z]
+  // melee/bullets: damage + a little shove. dir = [x,y,z]
   hurt(dmg, dir) {
     if (this.dead) return;
     this.damage(dmg);
@@ -168,18 +173,17 @@ export class LocalPlayer {
     this.damage(ex.damage * f);
   }
 
-  // ---- chairs ----
+  // ---- chairs (works even if the chair is tipped over, you just tip with it) ----
   sit(prop) {
-    const m = prop.mesh;
-    if (_v.set(0, 1, 0).applyQuaternion(m.quaternion).y < 0.6) return false;      // tipped over
-    this.seat = { prop, t: 0 };
+    this.seat = { prop, t: 0, lastYaw: null };
     this.body.collisionFilterMask = GROUPS.WORLD;                                // ignore the chair itself while seated
-    this.knockback = false;
+    this.knockback = false; this.bhop = 0;
     return true;
   }
   unseat(silent = false) {
     if (!this.seat) return;
     this.seat = null;
+    this.tilt.identity();
     const b = this.body;
     b.collisionFilterMask = GROUPS.WORLD | GROUPS.PROP;
     if (!silent) { b.position.x -= Math.sin(this.yaw) * 0.75; b.position.z -= Math.cos(this.yaw) * 0.75; b.position.y += 0.1; }
@@ -202,6 +206,12 @@ export class LocalPlayer {
       else {
         this.seat.t += dt;
         const m = pr.mesh;
+        _e.setFromQuaternion(m.quaternion, 'YXZ');                      // chair heading
+        const cy = _e.y;
+        _qa.setFromAxisAngle(AXIS_Y, cy).invert();
+        this.tilt.copy(m.quaternion).multiply(_qa);                    // tilt = chair rotation minus heading
+        if (this.seat.lastYaw !== null) { let d = cy - this.seat.lastYaw; d = Math.atan2(Math.sin(d), Math.cos(d)); this.yaw += d; }   // view spins with the chair
+        this.seat.lastYaw = cy;
         _v.set(0, -pr.spec.size[1], 0).applyQuaternion(m.quaternion).add(m.position);   // feet at the chair's floor
         b.position.set(_v.x, _v.y, _v.z); b.velocity.set(0, 0, 0);
         this.grounded = true; this.airTime = 0; this.fallSpeed = 0; this.knockback = false;
@@ -215,8 +225,8 @@ export class LocalPlayer {
     const was = this.grounded;
     this.grounded = !!hit && hit.hitNormalWorld.y > 0.5 && b.velocity.y < 3;
     if (hit) this.surface = hit.body?.surface || 'concrete';
-    if (!this.grounded) { this.fallSpeed = Math.max(this.fallSpeed, -b.velocity.y); this.airTime += dt; }
-    else { if (!was) this._land(); this.airTime = 0; this.airFromJump = false; }
+    if (!this.grounded) { this.fallSpeed = Math.max(this.fallSpeed, -b.velocity.y); this.airTime += dt; this.sinceLand = 0; }
+    else { if (!was) this._land(); this.airTime = 0; this.airFromJump = false; this.sinceLand += dt; }
 
     if (this.knockback) { this.knockTime += dt; if (this.grounded && this.knockTime > 0.3) this.knockback = false; }
     if (this.dead) { this.deathTimer -= dt; if (this.deathTimer <= 0) this.onRespawn?.(); }
@@ -224,10 +234,16 @@ export class LocalPlayer {
 
     const f = (down('forward') ? 1 : 0) - (down('back') ? 1 : 0);
     const s = (down('right') ? 1 : 0) - (down('left') ? 1 : 0);
+    const moving = f !== 0 || s !== 0;
     // sprint only while moving FORWARD (w, or w + a/d). sideways-only or backwards never sprints.
     const sprint = down('sprint') && down('forward') && !down('back');
     let speed = sprint ? PLAYER.SPRINT : PLAYER.WALK;
     if (f < 0) speed *= PLAYER.BACK_MULT;
+
+    // bhop bonus bleeds off when you stop hopping or stop moving
+    if (this.grounded && (this.sinceLand > 0.2 || !moving)) this.bhop = Math.max(0, this.bhop - PLAYER.BHOP_DECAY * dt);
+    speed *= 1 + this.bhop;
+
     const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw);
     let dx = -sin * f + cos * s, dz = -cos * f - sin * s;
     const len = Math.hypot(dx, dz);
@@ -244,6 +260,7 @@ export class LocalPlayer {
     }
 
     if (down('jump') && this.grounded && !this.knockback) {
+      if (moving && this.sinceLand < 0.15) this.bhop = Math.min(PLAYER.BHOP_MAX, this.bhop + PLAYER.BHOP_GAIN);   // landed and jumped right away = chain
       b.velocity.y = PLAYER.JUMP; this.grounded = false; this.airFromJump = true; this.airTime = 0;
       audio.play('jump');
     }
@@ -273,9 +290,20 @@ export class LocalPlayer {
     this.eye += (eye - this.eye) * k;
     this.roll += ((this.dead ? 0.9 : 0) - this.roll) * k;
     const p = this.body.position;
-    this.camera.position.set(p.x, p.y + this.eye, p.z);
-    this.camera.rotation.set(this.pitch, this.yaw, this.roll);
+    if (this.seat) {                                    // camera rides along with the (possibly tipped) chair
+      _v.set(0, this.eye, 0).applyQuaternion(this.tilt);
+      this.camera.position.set(p.x + _v.x, p.y + _v.y, p.z + _v.z);
+      _qa.setFromAxisAngle(AXIS_Y, this.yaw); _qb.setFromAxisAngle(AXIS_X, this.pitch);
+      this.camera.quaternion.copy(this.tilt).multiply(_qa).multiply(_qb);
+    } else {
+      this.camera.position.set(p.x, p.y + this.eye, p.z);
+      this.camera.rotation.set(this.pitch, this.yaw, this.roll);
+    }
   }
 
-  netState() { const p = this.body.position; return { p: [p.x, p.y, p.z], yaw: this.yaw, pitch: this.pitch, an: this.state }; }
+  netState() {
+    const p = this.body.position, t = this.tilt;
+    return { p: [p.x, p.y, p.z], yaw: this.yaw, pitch: this.pitch, an: this.state,
+      tq: this.seat ? [Math.round(t.x * 1000) / 1000, Math.round(t.y * 1000) / 1000, Math.round(t.z * 1000) / 1000, Math.round(t.w * 1000) / 1000] : null };
+  }
 }

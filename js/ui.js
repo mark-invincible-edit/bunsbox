@@ -1,8 +1,9 @@
-// ui.js - menus, spawn menu, hud, pause, settings. plain dom, real buttons.
+// ui.js - menus, spawn menu (3d previews), hud, pause, settings, nextbot dialog. plain dom, real buttons.
 import { MAPS, drawPreview } from './maps.js';
 import { SPAWNABLES, CATEGORIES } from './spawnables.js';
 import { ITEMS } from './items.js';
 import { KEYS } from './config.js';
+import { loadImage } from './imgutil.js';
 import * as audio from './audio.js';
 
 const $ = id => document.getElementById(id);
@@ -13,6 +14,7 @@ const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } ca
 export const settings = { sens: 1, volume: 0.7, fov: 75, ...(read(SETTINGS_KEY) || {}) };
 
 let h = {}, intent = 'sp', activeCat = CATEGORIES[0], helpTimer = 0, settingsReturn = null, lastPrompt = null;
+let previews = new Map(), isOwner = true;
 
 const keyLabel = c => c.startsWith('Key') ? c.slice(3) : c.startsWith('Shift') ? 'Shift' : c;
 export const keyLabels = a => [...new Set(KEYS[a].map(keyLabel))].join(' / ');
@@ -55,7 +57,23 @@ export function init(handlers) {
 
   $('lockhint').addEventListener('click', () => h.onLockClick());
   $('clear-all').addEventListener('click', () => h.onClearAll());
-  buildSpawnMenu();
+
+  // nextbot dialog
+  $('nb-url').addEventListener('input', () => {
+    nb.valid = false; nb.token++; $('nb-spawn').disabled = true;
+    clearTimeout(nb.timer); nb.timer = setTimeout(nbValidate, 450);
+  });
+  $('nb-speed').addEventListener('input', () => { $('nb-speed-out').textContent = $('nb-speed').value; });
+  $('nb-form').addEventListener('submit', e => {
+    e.preventDefault();
+    if (!nb.valid) return;
+    nb.onSpawn?.({ url: nb.url, speed: Number($('nb-speed').value) });
+    closeNextbot();
+  });
+  $('nb-cancel').addEventListener('click', closeNextbot);
+  $('nb').addEventListener('keydown', e => { if (e.key === 'Escape') closeNextbot(); });
+
+  buildCats();
   buildHelp();
 }
 
@@ -105,7 +123,7 @@ function openMaps() {
 
 // ---- hud
 export function showHUD(on) { $('hud').hidden = !on; if (on) { showScreen('none'); showHelp(true); clearTimeout(helpTimer); helpTimer = setTimeout(() => showHelp(false), 9000); } }
-export function hideGameUI() { for (const id of ['hud', 'pause', 'settings', 'spawnmenu']) $(id).hidden = true; }
+export function hideGameUI() { for (const id of ['hud', 'pause', 'settings', 'spawnmenu', 'nb']) $(id).hidden = true; }
 export function setHP(hp, max) {
   $('hp-fill').style.width = (100 * hp / max) + '%';
   $('hp').classList.toggle('low', hp < max * 0.3);
@@ -139,9 +157,9 @@ export function setHotbar(list, sel) {
 
 function buildHelp() {
   const rows = [
-    ['move', 'W A S D'], ['jump', keyLabels('jump')], ['sprint (forward only)', keyLabels('sprint') + ' + W'],
+    ['move', 'W A S D'], ['jump (hold to bunny hop)', keyLabels('jump')], ['sprint (forward only)', keyLabels('sprint') + ' + W'],
     ['spawn menu (hold)', keyLabels('spawnMenu')],
-    ['use: pick up / sit / thruster', keyLabels('use')], ['use held item', 'left click'], ['glue: cancel / unglue', 'right click'], ['switch items', 'scroll wheel'],
+    ['use: pick up / sit / thruster', keyLabels('use')], ['use held item', 'left click'], ['glue/hinge: cancel / remove', 'right click'], ['switch items', 'scroll wheel'],
     ['remove aimed prop', keyLabels('remove')], ['undo last spawn', keyLabels('undo')],
     ['detonate aimed explosive', keyLabels('detonate')], ['clear all props', keyLabels('clearAll')], ['this help', keyLabels('help')], ['pause', 'Esc'],
   ];
@@ -151,9 +169,19 @@ function buildHelp() {
 }
 
 // ---- spawn menu
-function buildSpawnMenu() {
+export function setPreviews(map) { previews = map; selectCat(activeCat); }
+export function setOwner(owner) {           // the OP tab only exists for the server owner (host / singleplayer)
+  isOwner = owner;
+  buildCats();
+}
+const catVisible = c => isOwner || SPAWNABLES.some(s => s.category === c && !s.op);
+
+function buildCats() {
   const cats = $('cats');
-  for (const c of CATEGORIES) {
+  cats.textContent = '';
+  const visible = CATEGORIES.filter(catVisible);
+  if (!visible.includes(activeCat)) activeCat = visible[0];
+  for (const c of visible) {
     const b = document.createElement('button');
     b.type = 'button'; b.role = 'tab'; b.textContent = c; b.dataset.cat = c;
     b.addEventListener('click', () => selectCat(c));
@@ -165,18 +193,56 @@ function selectCat(c) {
   activeCat = c;
   for (const b of $('cats').children) b.setAttribute('aria-selected', String(b.dataset.cat === c));
   const box = $('items'); box.textContent = '';
-  SPAWNABLES.filter(x => x.category === c).forEach((s, i) => {
+  SPAWNABLES.filter(x => x.category === c && (isOwner || !x.op)).forEach((s, i) => {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'item'; b.style.animationDelay = (i * 25) + 'ms';
-    const sw = document.createElement('i'); sw.style.background = '#' + s.color.toString(16).padStart(6, '0');
+    const pv = previews.get(s.id);
+    let icon;
+    if (pv) { icon = document.createElement('img'); icon.src = pv; icon.alt = ''; }
+    else { icon = document.createElement('i'); icon.style.background = '#' + s.color.toString(16).padStart(6, '0'); }
     const n = document.createElement('span'); n.textContent = s.name;
-    b.append(sw, n);
+    b.append(icon, n);
     b.addEventListener('click', () => h.onSpawnItem(s.id));
     box.append(b);
   });
 }
 export function openSpawn() { $('spawnmenu').hidden = false; }
 export function closeSpawn() { $('spawnmenu').hidden = true; }
+
+// ---- nextbot dialog: paste an image link, see if it works, pick a speed
+const nb = { token: 0, valid: false, url: '', onSpawn: null, onClose: null, timer: 0 };
+function nbStatus(msg, cls = '') { const el = $('nb-status'); el.textContent = msg; el.className = cls; }
+function nbValidate() {
+  const url = $('nb-url').value.trim(), prev = $('nb-preview');
+  nb.valid = false; $('nb-spawn').disabled = true;
+  if (!url) { prev.textContent = 'no image yet'; nbStatus(''); return; }
+  const token = ++nb.token;
+  prev.textContent = '...'; nbStatus('checking link...');
+  loadImage(url).then(img => {
+    if (token !== nb.token) return;
+    nb.valid = true; nb.url = url;
+    prev.replaceChildren(img);
+    nbStatus(`works! image is ${img.naturalWidth}x${img.naturalHeight}`, 'ok');
+    $('nb-spawn').disabled = false;
+  }).catch(e => {
+    if (token !== nb.token) return;
+    prev.textContent = 'invalid';
+    nbStatus(e.message, 'err');
+  });
+}
+export function openNextbot(onSpawn, onClose) {
+  nb.onSpawn = onSpawn; nb.onClose = onClose; nb.valid = false; nb.token++;
+  $('nb').hidden = false;
+  $('nb-spawn').disabled = true;
+  $('nb-speed-out').textContent = $('nb-speed').value;
+  nbValidate();
+  $('nb-url').focus();
+}
+function closeNextbot() {
+  $('nb').hidden = true; nb.token++; clearTimeout(nb.timer);
+  const cb = nb.onClose; nb.onClose = null; nb.onSpawn = null;
+  cb?.();
+}
 
 // ---- pause + settings
 export function showPause(on, room) {

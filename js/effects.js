@@ -1,8 +1,9 @@
-// effects.js - glowing sparks + explosion picture flash, plus the physgun beam.
+// effects.js - glowing sparks + explosion picture flash, muzzle flash, tracers, and the physgun beam.
 import * as THREE from 'three';
 import { EXPLOSION_IMAGES } from './config.js';
 
 let glowTex = null, boomTex = null;
+const UP = new THREE.Vector3(0, 1, 0);
 
 export function getGlowTexture() {
   if (glowTex) return glowTex;
@@ -33,18 +34,43 @@ export async function loadExplosionImage() {
 
 const additive = (map, color) => new THREE.SpriteMaterial({ map, color, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
 const FLASH_TIME = 0.22;
+const tracerGeo = new THREE.CylinderGeometry(0.012, 0.012, 1, 5, 1, true);
 
 export class Effects {
   constructor(parent) {
-    this.parent = parent; this.items = []; this.shake = 0;
+    this.parent = parent; this.items = []; this.shots = []; this.shake = 0;
     this.flash = new THREE.PointLight(0xffa040, 0, 80, 2);    // permanent so shaders never recompile mid-game
     parent.add(this.flash);
   }
 
+  // gun muzzle flash: the explosion picture, tiny, for ~60ms. always drawn on top.
+  muzzle(pos, size = 0.4) {
+    const tex = boomTex || getGlowTexture();
+    const mat = additive(tex, boomTex ? 0xffffff : 0xffc060);
+    mat.depthTest = false; mat.rotation = Math.random() * Math.PI * 2;
+    const s = new THREE.Sprite(mat);
+    s.renderOrder = 20; s.position.copy(pos);
+    const aspect = boomTex?.image ? boomTex.image.width / boomTex.image.height : 1;
+    s.scale.set(size * aspect, size, 1);
+    this.parent.add(s);
+    this.shots.push({ obj: s, mat, t: 0, dur: 0.06 });
+  }
+
+  tracer(from, to) {
+    const d = new THREE.Vector3().subVectors(to, from), len = d.length();
+    if (len < 0.1) return;
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false, fog: false });
+    const m = new THREE.Mesh(tracerGeo, mat);
+    m.frustumCulled = false;
+    m.position.copy(from).addScaledVector(d, 0.5);
+    m.quaternion.setFromUnitVectors(UP, d.normalize());
+    m.scale.set(1, len, 1);
+    this.parent.add(m);
+    this.shots.push({ obj: m, mat, t: 0, dur: 0.08 });
+  }
+
   explosion(pos, radius) {
     const p = new THREE.Vector3(pos.x, pos.y, pos.z);
-
-    // the picture: pops up big for a split second
     const tex = boomTex || getGlowTexture();
     const fm = additive(tex, boomTex ? 0xffffff : 0xffa040);
     const flash = new THREE.Sprite(fm);
@@ -52,7 +78,6 @@ export class Effects {
     this.parent.add(flash);
     const aspect = boomTex?.image ? boomTex.image.width / boomTex.image.height : 1;
 
-    // glowing sparks (one shared material per colour, sprites shrink instead of fading individually)
     const mats = [additive(getGlowTexture(), 0xffa733), additive(getGlowTexture(), 0xfff0b8)];
     const sparks = [], n = Math.min(120, 45 + Math.round(radius * 3));
     for (let i = 0; i < n; i++) {
@@ -72,6 +97,11 @@ export class Effects {
 
   update(dt) {
     this.shake = Math.max(0, this.shake - dt * 1.5);
+    for (const s of [...this.shots]) {
+      s.t += dt;
+      if (s.t >= s.dur) { this.parent.remove(s.obj); s.mat.dispose(); this.shots.splice(this.shots.indexOf(s), 1); continue; }
+      s.mat.opacity = 1 - s.t / s.dur;
+    }
     let light = 0;
     for (const it of [...this.items]) {
       it.t += dt;
@@ -88,7 +118,7 @@ export class Effects {
         sp.v.multiplyScalar(Math.exp(-1.1 * dt));
         sp.v.y -= 14 * dt;
         sp.s.position.addScaledVector(sp.v, dt);
-        sp.s.scale.setScalar(sp.size0 * (0.25 + (1 - it.t / sp.life)) * (0.8 + Math.random() * 0.4));   // twinkle + shrink
+        sp.s.scale.setScalar(sp.size0 * (0.25 + (1 - it.t / sp.life)) * (0.8 + Math.random() * 0.4));
       }
       light = Math.max(light, it.radius * it.radius * 0.9 * Math.max(0, 1 - it.t * 4));
 

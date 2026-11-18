@@ -31,7 +31,7 @@ export const ITEMS = {
   },
   gun: {
     name: 'Gun', glb: 'models/gun.glb', length: 0.38, modelRot: [90, -90, 0], color: 0x2b2f36, gun: 'GUN',
-    fp: { pos: [0.22, -0.7, -0.48], rot: [-Math.PI / 2, 0, 0] }, hand: { pos: [0, 0.05, 0.02], rot: [0, 0, 0] },
+    fp: { pos: [0.22, -0.4, -0.48], rot: [-Math.PI / 2, 0, 0] }, hand: { pos: [0, 0.05, 0.02], rot: [0, 0, 0] },
     hint: 'hold LMB: shoot (hurts players/npcs, nudges props)',
   },
   supergun: {

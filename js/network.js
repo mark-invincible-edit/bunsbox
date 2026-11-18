@@ -22,6 +22,7 @@ async function loadPeer() {
 const peerOpts = () => ({ debug: 1, config: { iceServers: NET.ICE_SERVERS } });
 const code5 = () => { const a = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 5; i++) s += a[Math.floor(Math.random() * a.length)]; return s; };
 const cleanName = n => String(n || 'player').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 16) || 'player';
+const CHUNK = 30000;      // webrtc data channels choke on big messages, so the welcome (which can hold a whole map) is split up
 
 function openPeer(P, id) {
   return new Promise((res, rej) => {
@@ -73,6 +74,11 @@ export class Net {
     return code;
   }
 
+  _sendBig(conn, obj) {
+    const s = JSON.stringify(obj), n = Math.max(1, Math.ceil(s.length / CHUNK));
+    for (let i = 0; i < n; i++) conn.send({ t: 'wc', i, n, s: s.slice(i * CHUNK, (i + 1) * CHUNK) });
+  }
+
   _hostData(conn, m) {
     if (!m || typeof m !== 'object') return;
     let c = conn._c;
@@ -83,7 +89,7 @@ export class Net {
       const w = this.h.getWelcome(c);
       if (!w) { conn.close(); return; }
       conn._c = c; this.clients.set(c.id, c);
-      conn.send({ t: 'welcome', you: c.id, ...w });
+      this._sendBig(conn, { t: 'welcome', you: c.id, ...w });
       this.broadcast({ t: 'join', id: c.id, name: c.name }, conn);
       this.h.onPlayerJoin(c);
       return;
@@ -133,14 +139,20 @@ export class Net {
     const welcome = await new Promise((res, rej) => {
       const to = setTimeout(() => rej(Object.assign(new Error('timed out. host unreachable (strict nat?)'), { type: 'timeout' })), NET.CONNECT_TIMEOUT);
       const fail = e => { clearTimeout(to); rej(e); };
+      const got = m => { clearTimeout(to); this.connected = true; this.myId = m.you; this.lastRecv = performance.now() / 1000; res(m); };
+      const parts = [];
       peer.on('error', fail);
       conn.on('error', fail);
       conn.on('open', () => conn.send({ t: 'hello', name: cleanName(name) }));
       conn.on('close', () => { if (!this.connected) fail(new Error('host closed the connection')); else this.h.onDisconnect('host disconnected'); });
       conn.on('data', m => {
-        if (m && m.t === 'welcome') { clearTimeout(to); this.connected = true; this.myId = m.you; this.lastRecv = performance.now() / 1000; res(m); }
-        else if (m && m.t === 'full') fail(new Error('room is full'));
-        else if (this.connected) this._clientData(m);
+        if (this.connected) { this._clientData(m); return; }
+        if (m && m.t === 'wc' && Number.isInteger(m.i) && Number.isInteger(m.n) && typeof m.s === 'string') {      // chunked welcome
+          parts[m.i] = m.s;
+          if (parts.filter(x => x !== undefined).length === m.n) {
+            try { got(JSON.parse(parts.join(''))); } catch (e) { fail(new Error('the host sent a corrupt welcome')); }
+          }
+        } else if (m && m.t === 'full') fail(new Error('room is full'));
       });
     });
     peer.on('error', e => { if (this.connected) this.h.onDisconnect('connection error: ' + friendlyError(e)); });

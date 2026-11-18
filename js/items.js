@@ -30,7 +30,7 @@ export const ITEMS = {
     hint: 'LMB prop 1, then LMB where prop 2 / a wall meets it (must be close) - RMB: cancel / remove joints',
   },
   gun: {
-    name: 'Gun', glb: 'models/gun.glb', length: 0.38, modelRot: [0, 0, 0], color: 0x2b2f36, gun: 'GUN',
+    name: 'Gun', glb: 'models/gun.glb', length: 0.38, modelRot: [0, 90, 0], color: 0x2b2f36, gun: 'GUN',
     fp: { pos: [0.22, -0.2, -0.48], rot: [-Math.PI / 2, 0, 0] }, hand: { pos: [0, 0.05, 0.02], rot: [0, 0, 0] },
     hint: 'hold LMB: shoot (hurts players/npcs, nudges props)',
   },

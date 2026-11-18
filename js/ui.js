@@ -1,5 +1,6 @@
-// ui.js - menus, spawn menu (3d previews), hud, pause, settings, nextbot dialog. plain dom, real buttons.
+// ui.js - menus, spawn menu (3d previews), hud, pause, settings, nextbot dialog, asset problems. plain dom, real buttons.
 import { MAPS, drawPreview } from './maps.js';
+import { parseMap, drawCustomPreview } from './mapfile.js';
 import { SPAWNABLES, CATEGORIES } from './spawnables.js';
 import { ITEMS } from './items.js';
 import { KEYS } from './config.js';
@@ -15,6 +16,7 @@ export const settings = { sens: 1, volume: 0.7, fov: 75, ...(read(SETTINGS_KEY) 
 
 let h = {}, intent = 'sp', activeCat = CATEGORIES[0], helpTimer = 0, settingsReturn = null, lastPrompt = null;
 let previews = new Map(), isOwner = true;
+const customMaps = [];     // maps imported this session (parsed .bm files)
 
 const keyLabel = c => c.startsWith('Key') ? c.slice(3) : c.startsWith('Shift') ? 'Shift' : c;
 export const keyLabels = a => [...new Set(KEYS[a].map(keyLabel))].join(' / ');
@@ -30,10 +32,31 @@ export function init(handlers) {
 
   $('btn-sp').addEventListener('click', () => { intent = 'sp'; openMaps(); });
   $('btn-mp').addEventListener('click', () => { setStatus('mp-status', ''); showScreen('mp'); });
+  $('btn-builder').addEventListener('click', () => h.onBuilder());
   $('btn-mp-back').addEventListener('click', () => showScreen('title'));
   $('btn-host').addEventListener('click', () => { intent = 'host'; openMaps(); });
   $('btn-maps-back').addEventListener('click', () => showScreen(intent === 'sp' ? 'title' : 'mp'));
   $('btn-settings-title').addEventListener('click', () => openSettings($('btn-settings-title')));
+
+  // asset problems (loading screen + title bar)
+  $('btn-retry').addEventListener('click', () => { $('btn-retry').disabled = true; h.onRetryAssets(); });
+  $('btn-retry-title').addEventListener('click', () => h.onRetryAssets());
+  $('btn-continue').addEventListener('click', () => h.onContinueAssets());
+
+  // map import
+  $('btn-import-map').addEventListener('click', () => $('map-file').click());
+  $('map-file').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    try {
+      if (f.size > 2e6) throw new Error('file too big (2mb max)');
+      const bm = parseMap(await f.text());
+      customMaps.unshift(bm);
+      openMaps();
+      setStatus('maps-status', `imported "${bm.meta.name}"`);
+    } catch (err) { setStatus('maps-status', err.message, true); }
+  });
 
   $('join-form').addEventListener('submit', async e => {
     e.preventDefault();
@@ -82,7 +105,7 @@ const SCREENS = ['loading', 'title', 'mp', 'maps'];
 export function showScreen(name) {
   $('menus').hidden = name === 'none';
   for (const s of SCREENS) $('screen-' + s).hidden = s !== name;
-  if (name !== 'none') $('screen-' + name).querySelector('button, input')?.focus();
+  if (name !== 'none') $('screen-' + name).querySelector('button:not([disabled]), input')?.focus();
 }
 export function showTitle(notice) {
   hideGameUI();
@@ -92,6 +115,28 @@ export function showTitle(notice) {
 export function setLoading(frac, text) { $('load-bar').value = frac; if (text) $('loading-text').textContent = text; }
 export function fatal(msg) { $('load-bar').hidden = true; $('loading-text').textContent = msg; $('loading-text').classList.add('err'); }
 
+// assets that timed out / failed: list them and offer retry or continue
+export function showLoadProblems(list, missingCount) {
+  $('load-bar').hidden = true;
+  $('loading-text').textContent = 'some assets did not finish loading.';
+  const box = $('load-fail'); box.hidden = false;
+  $('load-fail-title').textContent = `${list.length} asset${list.length === 1 ? '' : 's'} timed out or failed`;
+  const ul = $('load-fail-list'); ul.textContent = '';
+  for (const e of list) {
+    const li = document.createElement('li');
+    li.textContent = `${e.kind}: ${e.path} - ${e.status === 'timeout' ? 'timed out' : 'failed'}${e.detail ? ` (${e.detail})` : ''}`;
+    ul.append(li);
+  }
+  $('load-fail-note').textContent = missingCount ? `${missingCount} other optional assets were not found (fallbacks are used for those).` : '';
+  $('btn-retry').disabled = false;
+  showScreen('loading');
+}
+export function hideLoadProblems() { $('load-fail').hidden = true; $('load-bar').hidden = false; }
+export function setAssetWarning(n) {
+  $('asset-warn').hidden = !n;
+  $('asset-warn-text').textContent = `${n} asset${n === 1 ? '' : 's'} timed out, fallbacks are in use.`;
+}
+
 function setStatus(id, msg, isErr = false) { const el = $(id); el.textContent = msg; el.classList.toggle('err', isErr); }
 function lockButtons(on) { document.querySelectorAll('#screen-mp button, #screen-maps button').forEach(b => { b.disabled = on; }); }
 
@@ -100,24 +145,29 @@ function openMaps() {
   setStatus('maps-status', '');
   const box = $('map-list');
   box.textContent = '';
-  for (const m of MAPS) {
+  const card = (draw, title, desc, pick) => {
     const btn = document.createElement('button');
     btn.type = 'button'; btn.className = 'map-card';
     const cv = document.createElement('canvas'); cv.width = 320; cv.height = 180; cv.setAttribute('aria-hidden', 'true');
-    drawPreview(cv, m);
-    const t = document.createElement('strong'); t.textContent = m.name;
-    const d = document.createElement('span'); d.textContent = m.desc;
+    draw(cv);
+    const t = document.createElement('strong'); t.textContent = title;
+    const d = document.createElement('span'); d.textContent = desc;
     btn.append(cv, t, d);
     btn.addEventListener('click', async () => {
       write(NAME_KEY, $('player-name').value.trim());
-      if (intent === 'sp') { h.onStartSP(m.id); return; }
+      if (intent === 'sp') { pick.sp(); return; }
       setStatus('maps-status', 'creating room...');
       lockButtons(true);
-      try { await h.onHost(m.id, playerName()); } catch (err) { setStatus('maps-status', err.message, true); }
+      try { await pick.host(); } catch (err) { setStatus('maps-status', err.message, true); }
       lockButtons(false);
     });
     box.append(btn);
+  };
+  for (const bm of customMaps) {
+    card(cv => drawCustomPreview(cv, bm), `${bm.meta.name} (custom)`, `by ${bm.meta.author}${bm.meta.description ? ' - ' + bm.meta.description : ''}`,
+      { sp: () => h.onStartSP(null, bm), host: () => h.onHost(null, playerName(), bm) });
   }
+  for (const m of MAPS) card(cv => drawPreview(cv, m), m.name, m.desc, { sp: () => h.onStartSP(m.id, null), host: () => h.onHost(m.id, playerName(), null) });
   showScreen('maps');
 }
 

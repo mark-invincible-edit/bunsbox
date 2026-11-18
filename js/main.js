@@ -5,13 +5,16 @@ import { SPAWNABLES, getSpawnable } from './spawnables.js';
 import { ITEMS, Inventory, ViewModel } from './items.js';
 import * as assets from './assets.js';
 import * as audio from './audio.js';
+import { track, failed, missing, retryFailed } from './loader.js';
 import { MAPS, buildMap } from './maps.js';
+import { customMapToDef, buildCustom, entitiesOf, normalizeMap, normalizePart } from './mapfile.js';
 import { Physics } from './physics.js';
 import { LocalPlayer } from './player.js';
 import { Effects, Beam, loadExplosionImage } from './effects.js';
 import { Net, RemotePlayers, friendlyError } from './network.js';
 import { Npcs, updateNextbots } from './npcs.js';
 import { generatePreviews } from './preview.js';
+import { Builder } from './builder.js';
 import { safeImageUrl } from './imgutil.js';
 import * as ui from './ui.js';
 
@@ -44,28 +47,67 @@ addEventListener('resize', resize); resize();
 // ---------------------------------------------------------------- state
 let game = null;           // active session or null
 let locked = false;        // pointer lock
+let builder = null;        // map editor (created on first use)
+let fromBuilder = false;   // a singleplayer test of the builder map is running
 const keys = new Set();
 
-// ---------------------------------------------------------------- boot: preload everything, never block on failures
-async function boot() {
+// ---------------------------------------------------------------- boot: load everything, tell the player what timed out
+const loadExplosion = () => track('image', 'explosion', async () => {
+  const r = await Promise.race([loadExplosionImage().then(t => t ? 'ok' : 'missing'), new Promise(res => setTimeout(() => res('timeout'), 15000))]);
+  return { status: r, detail: r === 'timeout' ? 'stalled' : '' };
+});
+
+async function loadAll() {
   audio.setVolume(ui.settings.volume);
   const models = [...new Set([...SPAWNABLES.map(s => s.glb).filter(Boolean), ...Object.values(ITEMS).map(i => i.glb), 'plr.glb'])];
-  const jobs = [...TEXTURE_FILES.map(assets.loadTexture), ...models.map(assets.loadModel), ...SOUND_NAMES.map(audio.load), loadExplosionImage()];
+  const jobs = [...TEXTURE_FILES.map(assets.loadTexture), ...models.map(assets.loadModel), ...SOUND_NAMES.map(audio.load), loadExplosion()];
   let done = 0;
   jobs.forEach(p => p.then(() => ui.setLoading(++done / jobs.length, `loading assets ${done}/${jobs.length}`)));
-  await Promise.race([Promise.all(jobs), new Promise(r => setTimeout(r, 30000))]);   // hard cap, then go anyway
+  await Promise.all(jobs);          // every job resolves: idle timeouts + a download pool mean nothing can hang forever
+}
+
+async function toTitle() {
+  ui.hideLoadProblems();
   ui.setLoading(1, 'rendering previews...');
   await new Promise(r => setTimeout(r, 30));          // let the loading text paint
   try { ui.setPreviews(generatePreviews()); } catch (e) { console.warn('[preview] failed', e); }
+  ui.setAssetWarning(failed().length);
   ui.showTitle();
+}
+
+async function afterLoad() {
+  const bad = failed();
+  if (bad.length) { ui.showLoadProblems(bad, missing().length); return; }
+  await toTitle();
+}
+
+async function retryAssets() {
+  ui.showScreen('loading');
+  ui.hideLoadProblems();
+  ui.setLoading(0, 'retrying failed assets...');
+  await retryFailed((d, n) => ui.setLoading(d / n, `retrying ${d}/${n}`));
+  const bad = failed();
+  if (bad.length) ui.showLoadProblems(bad, missing().length); else await toTitle();
+}
+
+// ---------------------------------------------------------------- map builder
+function openBuilder(bm) {
+  if (!builder) {
+    builder = new Builder(renderer, canvas, {
+      onExit: () => { builder.close(); ui.showTitle(); },
+      onTest: m => { builder.close(); fromBuilder = true; startSession({ mode: 'sp', mapDef: customMapToDef(m) }); lock(); },
+    });
+  }
+  ui.showScreen('none');
+  builder.open(bm);
 }
 
 // ---------------------------------------------------------------- sessions
 function pickSpawn(map) { return map.spawns[Math.floor(Math.random() * map.spawns.length)]; }
 
-function startSession({ mode, mapId, net = null, name = 'player', code = '', welcome = null }) {
+function startSession({ mode, mapDef, net = null, name = 'player', code = '', welcome = null }) {
   endSession();
-  const map = MAPS.find(m => m.id === mapId) || MAPS[0];
+  const map = mapDef;
   const authority = mode !== 'client';
   const group = new THREE.Group();
   scene.add(group);
@@ -81,7 +123,10 @@ function startSession({ mode, mapId, net = null, name = 'player', code = '', wel
   group.add(hemi, sun, sun.target);
 
   const physics = new Physics(group, authority);
-  buildMap(map, { group, physics });
+  let hazards = [];
+  if (map.custom) { hazards = buildCustom(map.custom, { group, physics }); hazards.forEach((hz, i) => { hz.id = 'h' + i; }); }
+  else buildMap(map, { group, physics });
+
   const player = new LocalPlayer(physics, camera);
   player.spawn(pickSpawn(map));
   player.onRespawn = () => player.spawn(pickSpawn(map));
@@ -91,7 +136,7 @@ function startSession({ mode, mapId, net = null, name = 'player', code = '', wel
   const remote = new RemotePlayers(group);
   const vm = new ViewModel(camera);
 
-  game = { mode, map, group, sun, physics, player, effects, remote, vm, net, name, code, myProps: [], names: new Map(),
+  game = { mode, map, custom: map.custom || null, hazards, hitCd: new Map(), hitT: 0, group, sun, physics, player, effects, remote, vm, net, name, code, myProps: [], names: new Map(),
     npcs: authority ? new Npcs(group, physics) : null, npcView: authority ? null : new RemotePlayers(group),
     paused: false, modal: false, spawnHeld: false, tickAcc: 0, myId: welcome ? welcome.you : 0, lastHP: -1,
     inv: null, beams: new Map(), grab: null, grabTarget: null, jointSel: null, crowbarCd: 0, gunCd: 0, mouseDown: false };
@@ -113,12 +158,15 @@ function startSession({ mode, mapId, net = null, name = 'player', code = '', wel
       handleExplosion(pos, e);
       net?.broadcast({ t: 'boom', p: [r3(pos.x), r3(pos.y), r3(pos.z)], ex: e });
     };
+    if (map.custom) {                                   // props + loose parts from the map file (clients get them in the welcome packet)
+      for (const e of entitiesOf(map.custom)) physics.spawnProp(e.key, e.pos, 0, { quat: e.quat, data: e.data, mass: e.mass, anchored: e.anchored, bouncy: e.bouncy, silent: true, force: true, owner: -2, map: true });
+    }
   }
 
   if (welcome) {   // late joiner: rebuild the current world
     for (const p of welcome.players) { g.names.set(p.id, p.name); if (p.id !== welcome.you) remote.add(p.id, p.name); }
     for (const p of welcome.props) {
-      physics.spawnProp(p.key, p.p, 0, { id: p.id, quat: okQuat(p.q) ? p.q : null, owner: -1, silent: true, data: cleanRemoteData(p.d) });
+      physics.spawnProp(p.key, p.p, 0, { id: p.id, quat: okQuat(p.q) ? p.q : null, owner: -1, silent: true, data: cleanRemoteData(p.d), map: !!p.m });
       if (p.a) physics.setThruster(p.id, true);
     }
   }
@@ -201,15 +249,56 @@ function people() {                                  // living-or-not targets fo
   return out;
 }
 
+// ---------------------------------------------------------------- contact damage (map hazards + props/parts with damage > 0). authority only.
+const _tq = new THREE.Quaternion(), _tp = new THREE.Vector3(), _tc = new THREE.Vector3();
+function touching(src, feet) {                       // two spheres per body, same as the player collider
+  for (const [cy, r] of [[0.45, 0.45], [1.3, 0.4]]) {
+    _tp.set(feet.x, feet.y + cy, feet.z);
+    if (src.sphere) { if (_tp.distanceTo(src.pos) < src.half[0] + r) return true; continue; }
+    _tc.copy(_tp).sub(src.pos).applyQuaternion(_tq.copy(src.quat).invert());
+    const hx = clamp(_tc.x, -src.half[0], src.half[0]), hy = clamp(_tc.y, -src.half[1], src.half[1]), hz = clamp(_tc.z, -src.half[2], src.half[2]);
+    if (Math.hypot(_tc.x - hx, _tc.y - hy, _tc.z - hz) < r + 0.02) return true;
+  }
+  return false;
+}
+function contactDamage(dt) {
+  const g = game;
+  g.hitT += dt;
+  const srcs = g.hazards.slice();
+  for (const p of g.physics.props.values()) {
+    const dmg = p.data?.damage;
+    if (!(dmg > 0)) continue;
+    const s = p.spec, b = p.body.position, q = p.body.quaternion;
+    srcs.push({ id: 'p' + p.id, pos: new THREE.Vector3(b.x, b.y, b.z), quat: new THREE.Quaternion(q.x, q.y, q.z, q.w), half: s.shape === 'sphere' ? [s.size[0]] : s.size, sphere: s.shape === 'sphere', damage: dmg });
+  }
+  if (!srcs.length) return;
+  const T = [];
+  if (!g.player.dead) T.push({ kind: 'player', id: g.myId, pos: g.player.body.position });
+  for (const [id, r] of g.remote.map) if (r.av.state !== 'dead') T.push({ kind: 'player', id, pos: r.av.group.position });
+  for (const n of g.npcs.list.values()) if (n.hp > 0) T.push({ kind: 'npc', id: n.id, pos: n.body.position });
+  for (const s of srcs) for (const t of T) {
+    if (!touching(s, t.pos)) continue;
+    const k = `${s.id}|${t.kind}${t.id}`;
+    if ((g.hitCd.get(k) || 0) > g.hitT) continue;
+    g.hitCd.set(k, g.hitT + 0.5);
+    const dx = t.pos.x - s.pos.x, dz = t.pos.z - s.pos.z, l = Math.hypot(dx, dz) || 1;
+    deliverHit(t.kind, t.id, [dx / l, 0.3, dz / l], s.damage, { x: s.pos.x, z: s.pos.z });
+  }
+  if (g.hitCd.size > 500) g.hitCd.clear();
+}
+
 // ---------------------------------------------------------------- spawning
 function cleanData(spec, data) {                     // nextbot data. null = not a nextbot, undefined = invalid
   if (!spec.nextbot) return null;
   if (!data || !safeImageUrl(data.url)) return undefined;
   return { url: data.url, speed: clamp(Number(data.speed) || NEXTBOT.SPEED_DEFAULT, NEXTBOT.SPEED_MIN, NEXTBOT.SPEED_MAX) };
 }
-function cleanRemoteData(d) {                        // data the host sent us: only keep a safe url
-  if (!d || typeof d !== 'object' || !safeImageUrl(d.url)) return null;
-  return { url: d.url, speed: Number(d.speed) || 0 };
+function cleanRemoteData(d) {                        // data the host sent us: only keep what we understand
+  if (!d || typeof d !== 'object') return null;
+  const out = {};
+  if (safeImageUrl(d.url)) { out.url = d.url; out.speed = Number(d.speed) || 0; }
+  if (d.part) { const p = normalizePart(d.part); if (p) out.part = p; }
+  return Object.keys(out).length ? out : null;
 }
 
 // authority only. returns an error string or null
@@ -405,7 +494,7 @@ function shotFx(by, end) {                            // somebody else fired: fl
 function grabStart() {
   const g = game, P = IC.PHYSGUN;
   const { hit } = aim(P.REACH), p = propAt(hit);
-  if (!p) return;
+  if (!p || p.anchored) return;
   g.grab = { id: p.id, dist: clamp(hit.dist, P.MIN_DIST, P.MAX_DIST) };
   if (g.mode === 'client') g.net.send({ t: 'grab', id: p.id }); else g.physics.startGrab(0, p.id);
 }
@@ -480,9 +569,10 @@ const netHandlers = {
   getWelcome() {
     const g = game; if (!g) return null;
     return {
-      map: g.map.id,
+      map: g.custom ? 'custom' : g.map.id,
+      custom: g.custom || null,                          // the whole map file travels to the joiner
       players: [{ id: 0, name: g.name }, ...[...g.net.clients.values()].map(c => ({ id: c.id, name: c.name }))],
-      props: [...g.physics.props.values()].map(p => ({ id: p.id, key: p.key, a: p.active ? 1 : 0, d: p.data || null,
+      props: [...g.physics.props.values()].map(p => ({ id: p.id, key: p.key, a: p.active ? 1 : 0, m: p.map ? 1 : 0, d: p.data || null,
         p: [p.body.position.x, p.body.position.y, p.body.position.z],
         q: [p.body.quaternion.x, p.body.quaternion.y, p.body.quaternion.z, p.body.quaternion.w] })),
     };
@@ -565,7 +655,7 @@ const netHandlers = {
   onJoin(m) { const g = game; if (!g) return; g.names.set(m.id, m.name); g.remote.add(m.id, m.name); ui.toast(`${m.name} joined`); updateCount(); },
   onLeave(m) { const g = game; if (!g) return; g.remote.remove(m.id); ui.toast(`${g.names.get(m.id) || 'player'} left`); updateCount(); },
   onToast(m) { ui.toast(String(m.msg)); },
-  onDisconnect(reason) { if (!game) return; endSession(); ui.showTitle(reason); },
+  onDisconnect(reason) { if (!game) return; fromBuilder = false; endSession(); ui.showTitle(reason); },
 };
 
 // ---------------------------------------------------------------- pointer lock, pause, input
@@ -643,24 +733,33 @@ addEventListener('wheel', e => {
 addEventListener('beforeunload', () => game?.net?.close());
 
 // ---------------------------------------------------------------- ui wiring
+const defFor = (mapId, custom) => custom ? customMapToDef(custom) : (MAPS.find(m => m.id === mapId) || MAPS[0]);
 ui.init({
-  onStartSP(mapId) { startSession({ mode: 'sp', mapId }); lock(); },
-  async onHost(mapId, name) {
+  onStartSP(mapId, custom) { startSession({ mode: 'sp', mapDef: defFor(mapId, custom) }); lock(); },
+  async onHost(mapId, name, custom) {
     const net = new Net(netHandlers);
-    try { const code = await net.host(name); startSession({ mode: 'host', mapId, net, name, code }); lock(); }
+    try { const code = await net.host(name); startSession({ mode: 'host', mapDef: defFor(mapId, custom), net, name, code }); lock(); }
     catch (e) { net.close(); throw new Error(friendlyError(e)); }
   },
   async onJoin(code, name) {
     const net = new Net(netHandlers);
-    try { const w = await net.join(code, name); startSession({ mode: 'client', mapId: w.map, net, name, code: code.toUpperCase(), welcome: w }); lock(); }
-    catch (e) { net.close(); throw new Error(friendlyError(e)); }
+    try {
+      const w = await net.join(code, name);
+      let def;
+      if (w.custom) { try { def = customMapToDef(normalizeMap(w.custom)); } catch (e) { throw new Error('the host sent a broken map file'); } }
+      else def = defFor(w.map, null);
+      startSession({ mode: 'client', mapDef: def, net, name, code: code.toUpperCase(), welcome: w }); lock();
+    } catch (e) { net.close(); throw new Error(friendlyError(e)); }
   },
   onResume: resume,
-  onExit() { endSession(); ui.showTitle(); },
+  onExit() { endSession(); if (fromBuilder) { fromBuilder = false; openBuilder(); } else ui.showTitle(); },
   onSettings() { camera.fov = ui.settings.fov; camera.updateProjectionMatrix(); audio.setVolume(ui.settings.volume); },
   onSpawnItem(id) { const spec = getSpawnable(id); if (spec?.dialog === 'nextbot') openNextbotDialog(id); else requestSpawn(id); },
   onClearAll() { clearAll(); },
   onLockClick() { lock(); },
+  onBuilder() { openBuilder(); },
+  onRetryAssets: retryAssets,
+  onContinueAssets: toTitle,
 });
 camera.fov = ui.settings.fov; camera.updateProjectionMatrix();
 
@@ -669,6 +768,7 @@ const clock = new THREE.Clock();
 function frame() {
   requestAnimationFrame(frame);
   const dt = Math.min(clock.getDelta(), 0.05);
+  if (builder?.active) { builder.update(dt); renderer.render(builder.scene, builder.camera); return; }
   if (!game) return;
   update(dt);
   renderer.render(scene, camera);
@@ -708,10 +808,11 @@ function update(dt) {
   g.crowbarCd = Math.max(0, g.crowbarCd - dt); g.gunCd = Math.max(0, g.gunCd - dt);
   if (sim) {
     g.player.update(dt, keys, locked && !g.paused && !g.modal);
-    if (g.npcs) {                                       // npc + nextbot ai (authority only)
+    if (g.npcs) {                                       // npc + nextbot ai + contact damage (authority only)
       const ppl = people();
       g.npcs.update(dt, ppl);
       updateNextbots(g.physics, dt, ppl, g.npcs, killPerson, (n, from) => g.npcs.hurt(n.id, 9999, { x: 0, y: 1, z: 0 }, from));
+      contactDamage(dt);
     }
     g.physics.step(dt);
     if (g.mode === 'client') { g.physics.updateClient(t - NET.INTERP_DELAY); g.npcView.update(dt, t - NET.INTERP_DELAY); }
@@ -766,5 +867,5 @@ function update(dt) {
   }
 }
 
-boot();
+loadAll().then(afterLoad);
 frame();

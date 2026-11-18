@@ -107,4 +107,33 @@ export class Inventory {
 export class ViewModel {
   constructor(camera) {
     this.camera = camera; this.root = new THREE.Group(); camera.add(this.root);
-    this.model = null; this.def = null;
+    this.model = null; this.def = null; this.raise = 0; this.swing = 0; this.recoil = 0; this.bobT = 0;
+  }
+  set(id) {
+    if (this.model) { this.root.remove(this.model); this.model = null; }
+    if (!id) return;
+    this.def = ITEMS[id];
+    this.model = buildItemModel(id);
+    this.model.traverse(o => { if (o.isMesh) { o.castShadow = false; o.frustumCulled = false; } });
+    this.root.add(this.model);
+    this.raise = 1;            // pull-out animation
+  }
+  swingNow() { this.swing = 1; }
+  recoilNow() { this.recoil = 1; }
+  tip(out) { const t = this.model?.userData.tip; return t ? t.getWorldPosition(out) : null; }
+  update(dt, speed, visible) {
+    this.root.visible = visible && !!this.model;
+    if (!this.model) return;
+    this.bobT += dt * (4 + speed * 1.2);
+    const amp = Math.min(speed / 6, 1);
+    this.raise = Math.max(0, this.raise - dt * 4.5);
+    this.swing = Math.max(0, this.swing - dt * 3.6);
+    this.recoil = Math.max(0, this.recoil - dt * 12);
+    const b = this.def.fp, arc = Math.sin(this.swing * Math.PI), r = this.raise * this.raise;
+    this.model.position.set(
+      b.pos[0] + Math.sin(this.bobT * 0.5) * 0.012 * amp,
+      b.pos[1] - r * 0.4 + Math.abs(Math.sin(this.bobT)) * 0.01 * amp - arc * 0.05,
+      b.pos[2] - arc * 0.15 + this.recoil * 0.06);
+    this.model.rotation.set(b.rot[0] - arc * 1.3 + this.recoil * 0.14, b.rot[1] + arc * 0.2, b.rot[2]);
+  }
+}

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>bunsbox - browser sandbox</title>
-  <meta name="description" content="a small gmod-style sandbox that runs in your browser, with peer-to-peer multiplayer.">
+  <meta name="description" content="a small gmod-style sandbox that runs in your browser, with peer-to-peer multiplayer and a map builder.">
   <meta name="color-scheme" content="dark">
   <meta name="theme-color" content="#14161a">
   <!-- inline svg favicon, no file needed -->
@@ -53,18 +53,32 @@
       <h1>bunsbox</h1>
       <progress id="load-bar" max="1" value="0"></progress>
       <p id="loading-text" role="status">loading assets...</p>
+      <div id="load-fail" hidden>
+        <h2 id="load-fail-title"></h2>
+        <ul id="load-fail-list"></ul>
+        <p id="load-fail-note" class="bd-dim"></p>
+        <div class="row">
+          <button id="btn-retry" class="primary" type="button">retry timed out assets</button>
+          <button id="btn-continue" type="button">continue anyway</button>
+        </div>
+      </div>
     </section>
 
     <section id="screen-title" class="screen" hidden>
       <h1>bunsbox</h1>
       <p class="tag">a sandbox that lives in your browser</p>
       <p id="notice" role="alert" hidden></p>
+      <div id="asset-warn" hidden>
+        <span id="asset-warn-text"></span>
+        <button id="btn-retry-title" type="button">retry</button>
+      </div>
       <label class="field">your name
         <input id="player-name" maxlength="16" autocomplete="off" placeholder="player">
       </label>
       <div class="stack">
         <button id="btn-sp" class="primary" type="button">singleplayer</button>
         <button id="btn-mp" type="button">multiplayer</button>
+        <button id="btn-builder" type="button">map builder</button>
         <button id="btn-settings-title" type="button">settings</button>
       </div>
     </section>
@@ -87,8 +101,12 @@
     <section id="screen-maps" class="screen" hidden>
       <h2 id="maps-title">pick a map</h2>
       <div id="map-list"></div>
+      <div class="row">
+        <button id="btn-import-map" type="button">import map (.bm)</button>
+        <button id="btn-maps-back" type="button">back</button>
+      </div>
+      <input id="map-file" type="file" accept=".bm,.json,application/json" hidden>
       <p id="maps-status" role="status"></p>
-      <button id="btn-maps-back" type="button">back</button>
     </section>
   </main>
 
@@ -111,6 +129,7 @@
       <button id="btn-settings-back" class="primary" type="button">back</button>
     </div>
   </div>
+
   <div id="nb" class="overlay" role="dialog" aria-modal="true" aria-labelledby="nb-title" hidden>
     <form id="nb-form" class="panel stack" autocomplete="off">
       <h2 id="nb-title">spawn a nextbot</h2>
@@ -126,6 +145,10 @@
       <button id="nb-cancel" type="button">cancel</button>
     </form>
   </div>
+
+  <!-- map builder ui is created by js/builder.js -->
+  <div id="builder" hidden></div>
+
   <noscript><p class="notice-static">this game needs javascript.</p></noscript>
   <script type="module" src="js/main.js"></script>
 </body>

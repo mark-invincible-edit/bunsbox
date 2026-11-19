@@ -1,45 +1,49 @@
-// assets.js - every load resolves (null on failure), nothing here ever throws or hangs.
+// assets.js - every load resolves (never throws or hangs), failures are tracked by loader.js.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { PLAYER } from './config.js';
+import { fetchBytes, track } from './loader.js';
 
-const TIMEOUT = 20000;
 const texReady = new Map();    // file -> Texture
 const gltfReady = new Map();   // path -> gltf
 const texLoader = new THREE.TextureLoader();
 const gltfLoader = new GLTFLoader();
+const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' };
+
+function decodeTexture(buf, file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(new Blob([buf], { type: MIME[file.split('.').pop().toLowerCase()] || 'image/png' }));
+    texLoader.load(url, tex => {
+      URL.revokeObjectURL(url);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = 4;
+      res(tex);
+    }, undefined, e => { URL.revokeObjectURL(url); rej(e); });
+  });
+}
 
 export function loadTexture(file) {
-  return new Promise(resolve => {
-    const timer = setTimeout(() => { console.warn(`[assets] texture timeout: ${file}`); resolve(null); }, TIMEOUT);
-    try {
-      texLoader.load(`assets/${file}`, tex => {
-        clearTimeout(timer);
-        tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.anisotropy = 4;
-        texReady.set(file, tex);
-        resolve(tex);
-      }, undefined, () => { clearTimeout(timer); console.warn(`[assets] missing texture: ${file} (using solid color)`); resolve(null); });
-    } catch (e) { clearTimeout(timer); resolve(null); }
+  return track('texture', file, async fresh => {
+    const r = await fetchBytes(`assets/${file}`, null, fresh);
+    if (r.status !== 'ok') return r;
+    try { texReady.set(file, await decodeTexture(r.data, file)); return { status: 'ok' }; }
+    catch (e) { return { status: 'broken', detail: 'could not decode the image' }; }
   });
 }
 export const getTexture = file => texReady.get(file) || null;
 
 export function loadModel(path) {
-  return new Promise(resolve => {
-    const timer = setTimeout(() => { console.warn(`[assets] model timeout: ${path}`); resolve(null); }, TIMEOUT);
+  return track('model', path, async fresh => {
+    const r = await fetchBytes(`assets/${path}`, null, fresh);
+    if (r.status !== 'ok') return r;
     try {
-      gltfLoader.load(`assets/${path}`, gltf => {
-        clearTimeout(timer);
-        if (PLAYER.STRIP_ROOT_MOTION) {
-          for (const c of gltf.animations) c.tracks = c.tracks.filter(t => !/hips\.position$/i.test(t.name));
-        }
-        gltfReady.set(path, gltf);
-        resolve(gltf);
-      }, undefined, () => { clearTimeout(timer); console.warn(`[assets] missing model: ${path} (using placeholder)`); resolve(null); });
-    } catch (e) { clearTimeout(timer); resolve(null); }
+      const gltf = await gltfLoader.parseAsync(r.data, `assets/${path.slice(0, path.lastIndexOf('/') + 1)}`);
+      if (PLAYER.STRIP_ROOT_MOTION) for (const c of gltf.animations) c.tracks = c.tracks.filter(t => !/hips\.position$/i.test(t.name));
+      gltfReady.set(path, gltf);
+      return { status: 'ok' };
+    } catch (e) { return { status: 'broken', detail: 'could not read the glb (draco/meshopt compressed?)' }; }
   });
 }
 

@@ -8,6 +8,7 @@ import { cloneModel, makePlaceholder } from './assets.js';
 import { buildItemModel } from './items.js';
 import { SnapshotBuffer } from './interp.js';
 import { safeImageUrl, loadImage } from './imgutil.js';
+import { partMesh, specFromPart } from './mapfile.js';
 
 const r3 = v => Math.round(v * 1000) / 1000;
 const UP = new THREE.Vector3(0, 1, 0);
@@ -37,9 +38,10 @@ function nextbotSprite(data) {
   return s;
 }
 
-// ---------------------------------------------------------------- visuals (also used for the spawn menu previews)
+// ---------------------------------------------------------------- visuals (also used for spawn menu previews + the map builder)
 export function buildVisual(spec, data = null) {
   const holder = new THREE.Group();
+  if (spec.part) { holder.add(partMesh(spec.part)); return holder; }       // custom map part
   if (spec.nextbot) { holder.add(nextbotSprite(data)); return holder; }
   if (spec.item) {                                   // inventory items: auto-fitted model (or procedural), lying flat
     const m = buildItemModel(spec.item);
@@ -113,14 +115,16 @@ export class Physics {
   }
 
   // ---- static world ----
-  addStaticBox(size, pos, quat, surface) {
+  _static(shape, pos, surface, quat) {
     const b = new CANNON.Body({ mass: 0, material: this.groundMat, collisionFilterGroup: GROUPS.WORLD, collisionFilterMask: GROUPS.PLAYER | GROUPS.PROP });
-    b.addShape(new CANNON.Box(new CANNON.Vec3(size[0] / 2, size[1] / 2, size[2] / 2)));
+    b.addShape(shape);
     b.position.set(pos[0], pos[1], pos[2]);
-    b.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+    if (quat) b.quaternion.set(quat.x, quat.y, quat.z, quat.w);
     b.surface = surface;
     this.world.addBody(b);
   }
+  addStaticBox(size, pos, quat, surface) { this._static(new CANNON.Box(new CANNON.Vec3(size[0] / 2, size[1] / 2, size[2] / 2)), pos, surface, quat); }
+  addStaticSphere(radius, pos, surface) { this._static(new CANNON.Sphere(radius), pos, surface, null); }
 
   // two spheres stacked = cheap capsule. body origin is at the player's FEET. (npcs use this too)
   createPlayerBody() {
@@ -169,18 +173,20 @@ export class Physics {
   }
 
   // ---- props ----
-  // opts: { id, owner, quat:[x,y,z,w], silent, data }
+  // opts: { id, owner, quat:[x,y,z,w], silent, data, force (ignore prop limit), anchored (static body), mass, bouncy, map (part of the map file) }
+  // key '__part' = a custom map part, its definition travels in opts.data.part
   spawnProp(key, pos, yaw = 0, opts = {}) {
-    const spec = getSpawnable(key);
+    const spec = key === '__part' ? (opts.data?.part ? specFromPart(opts.data.part) : null) : getSpawnable(key);
     if (!spec || spec.npc) { console.warn(`[physics] cannot spawn as prop: ${key}`); return null; }
-    if (this.isAuthority && this.props.size >= LIMITS.MAX_PROPS) return null;
+    if (this.isAuthority && !opts.force && this.props.size >= LIMITS.MAX_PROPS) return null;
     const id = opts.id ?? this.nextId++;
     if (id >= this.nextId) this.nextId = id + 1;
+    const anchored = !!opts.anchored, bouncy = opts.bouncy ?? spec.bouncy;
 
     const body = new CANNON.Body({
-      type: this.isAuthority ? CANNON.Body.DYNAMIC : CANNON.Body.KINEMATIC,
-      mass: this.isAuthority ? spec.mass : 0,
-      material: spec.bouncy ? this.bouncyMat : this.propMat,
+      type: anchored ? CANNON.Body.STATIC : (this.isAuthority ? CANNON.Body.DYNAMIC : CANNON.Body.KINEMATIC),
+      mass: (anchored || !this.isAuthority) ? 0 : (opts.mass ?? spec.mass),
+      material: bouncy ? this.bouncyMat : this.propMat,
       linearDamping: 0.05, angularDamping: 0.25,
       allowSleep: !spec.nextbot, sleepSpeedLimit: 0.2, sleepTimeLimit: 1,
       fixedRotation: !!spec.nextbot,                  // nextbots never tumble (their sprite is an offset billboard)
@@ -199,7 +205,7 @@ export class Physics {
     this.world.addBody(body);
 
     const prop = { id, key, spec, body, mesh, owner: opts.owner ?? 0, data: opts.data || null, buf: new SnapshotBuffer(),
-      sentSleep: false, chained: false, active: false, flame: mesh.userData.flame || null };
+      sentSleep: false, chained: false, active: false, anchored, map: !!opts.map, flame: mesh.userData.flame || null };
     this.props.set(id, prop);
 
     if (this.isAuthority && spec.explosive) {
@@ -225,10 +231,11 @@ export class Physics {
     if (!silent) this.hooks.onRemove?.(id);
     return true;
   }
+  // "clear all" leaves props that belong to the map file alone
   clearProps() {
     for (const j of this.joints) this._dropJoint(j);
     this.joints = []; this.grabs.clear();
-    for (const id of [...this.props.keys()]) this.removeProp(id, true);
+    for (const p of [...this.props.values()]) if (!p.map) this.removeProp(p.id, true);
     this.timers.length = 0;
     this.hooks.onClear?.();
   }
@@ -236,8 +243,8 @@ export class Physics {
   // ---- interactions (authority only) ----
   knockProp(id, d, mag) {
     const p = this.props.get(id);
-    if (!this.isAuthority || !p) return;
-    const l = Math.hypot(d.x, d.y, d.z) || 1, dv = Math.min(14, mag / p.spec.mass);
+    if (!this.isAuthority || !p || p.anchored) return;
+    const l = Math.hypot(d.x, d.y, d.z) || 1, dv = Math.min(14, mag / p.body.mass);
     p.body.wakeUp();
     p.body.velocity.x += d.x / l * dv; p.body.velocity.y += d.y / l * dv + dv * 0.15; p.body.velocity.z += d.z / l * dv;
     p.body.angularVelocity.set((Math.random() - 0.5) * dv * 0.4, (Math.random() - 0.5) * dv * 0.4, (Math.random() - 0.5) * dv * 0.4);
@@ -251,7 +258,7 @@ export class Physics {
   }
   setThruster(id, on) { const p = this.props.get(id); if (p) p.active = on; }     // clients: visual only
 
-  startGrab(owner, id) { const p = this.props.get(id); if (this.isAuthority && p) this.grabs.set(owner, { id, target: [p.body.position.x, p.body.position.y, p.body.position.z] }); }
+  startGrab(owner, id) { const p = this.props.get(id); if (this.isAuthority && p && !p.anchored) this.grabs.set(owner, { id, target: [p.body.position.x, p.body.position.y, p.body.position.z] }); }
   setGrabTarget(owner, t) { const g = this.grabs.get(owner); if (g) g.target = t; }
   endGrab(owner) { this.grabs.delete(owner); }
 
@@ -331,6 +338,7 @@ export class Physics {
       if (dist > ex.radius) continue;
       const f = 1 - dist / ex.radius;
       if (p.spec.explosive && !p.chained && f > 0.35) { p.chained = true; this.timers.push({ t: 0.12 + Math.random() * 0.25, id: p.id }); }
+      if (p.anchored) continue;
       let ux = dx / (dist || 1), uy = dy / (dist || 1) + 0.5, uz = dz / (dist || 1);
       const l = Math.hypot(ux, uy, uz);
       const dv = ex.force * f;
@@ -356,7 +364,7 @@ export class Physics {
       b.angularVelocity.scale(0.85, b.angularVelocity);
     }
     for (const p of this.props.values()) {                 // thrusters push along their facing
-      if (!p.active || !p.spec.thruster) continue;
+      if (!p.active || !p.spec.thruster || p.anchored) continue;
       const t = p.spec.thruster;
       V.set(t.dir[0], t.dir[1], t.dir[2]);
       p.body.quaternion.vmult(V, V);
@@ -366,8 +374,7 @@ export class Physics {
     }
     for (const j of this.joints) {                         // never let half a joined pair fall asleep
       const a = this.props.get(j.a)?.body, b = j.b != null ? this.props.get(j.b)?.body : null;
-      if (!a) continue;
-      if (!b) { if (a.sleepState === CANNON.Body.SLEEPING && j.kind === 'hinge') { /* door at rest, fine */ } continue; }
+      if (!a || !b) continue;
       if (a.sleepState === CANNON.Body.SLEEPING && b.sleepState !== CANNON.Body.SLEEPING) a.wakeUp();
       else if (b.sleepState === CANNON.Body.SLEEPING && a.sleepState !== CANNON.Body.SLEEPING) b.wakeUp();
     }
@@ -390,6 +397,7 @@ export class Physics {
     const due = this.timers.filter(t => t.t <= 0);
     if (due.length) { this.timers = this.timers.filter(t => t.t > 0); for (const t of due) this.detonate(t.id); }
     for (const p of [...this.props.values()]) {
+      if (p.anchored) continue;
       if (p.body.position.y < -60) { this.removeProp(p.id); continue; }
       p.mesh.position.copy(p.body.position);
       p.mesh.quaternion.copy(p.body.quaternion);
@@ -397,10 +405,11 @@ export class Physics {
   }
 
   // ---- network helpers ----
-  // props that moved since last call (sleeping ones are sent once, then skipped)
+  // props that moved since last call (sleeping ones are sent once, then skipped; anchored ones never move)
   collectDelta() {
     const out = [];
     for (const p of this.props.values()) {
+      if (p.anchored) continue;
       const sleeping = p.body.sleepState === CANNON.Body.SLEEPING;
       if (sleeping && p.sentSleep) continue;
       p.sentSleep = sleeping;

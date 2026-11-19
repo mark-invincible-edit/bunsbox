@@ -1,4 +1,6 @@
 // audio.js - webaudio, every sound is optional. missing file = silence.
+import { fetchBytes, track } from './loader.js';
+
 const AC = window.AudioContext || window.webkitAudioContext;
 let ctx = null, master = null, ambient = null;
 const bufs = new Map();
@@ -10,23 +12,22 @@ export function unlock() { if (ctx && ctx.state === 'suspended') ctx.resume().ca
 export function setVolume(v) { if (master) master.gain.value = v; }
 export function setListener(p) { listener.x = p.x; listener.y = p.y; listener.z = p.z; }
 
-// tries name.mp3 then name.ogg. never rejects.
-export async function load(name) {
-  if (!ctx) { bufs.set(name, null); return null; }
-  for (const ext of ['mp3', 'ogg']) {
-    try {
-      const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(), 10000);
-      const res = await fetch(`assets/sounds/${name}.${ext}`, { signal: ac.signal });
-      clearTimeout(t);
-      if (!res.ok) continue;
-      const buf = await ctx.decodeAudioData(await res.arrayBuffer());
-      bufs.set(name, buf);
-      return buf;
-    } catch (e) { /* try next extension */ }
-  }
-  bufs.set(name, null);
-  return null;
+// tries name.mp3 then name.ogg. a 404 on both = silent (not a failure), a stall = reported as timed out.
+export function load(name) {
+  return track('sound', name, async fresh => {
+    if (!ctx) { bufs.set(name, null); return { status: 'missing', detail: 'no audio support' }; }
+    let worst = 'missing', detail = '';
+    for (const ext of ['mp3', 'ogg']) {
+      const r = await fetchBytes(`assets/sounds/${name}.${ext}`, null, fresh);
+      if (r.status === 'ok') {
+        try { bufs.set(name, await ctx.decodeAudioData(r.data)); return { status: 'ok' }; }
+        catch (e) { worst = 'broken'; detail = 'could not decode the audio file'; continue; }
+      }
+      if (r.status !== 'missing') { worst = r.status; detail = r.detail || ''; }
+    }
+    if (!bufs.has(name)) bufs.set(name, null);
+    return { status: worst, detail };
+  });
 }
 
 // at = optional {x,y,z} for distance attenuation

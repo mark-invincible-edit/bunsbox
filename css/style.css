@@ -159,3 +159,12 @@ progress { width: min(420px, 80vw); height: 14px; accent-color: var(--acc); }
 @keyframes grid { to { background-position: 0 0, 56px 56px, 56px 56px, 0 0; } }
 @keyframes hurt { 0% { opacity: 1; } 100% { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* ---------- chat ---------- */
+#chat { position: absolute; left: 22px; bottom: 64px; width: min(460px, 62vw); display: flex; flex-direction: column; gap: .35rem; }
+#chat-log { display: flex; flex-direction: column; gap: .15rem; font-size: .92rem; text-shadow: 0 0 4px #000; }
+#chat-log div { background: rgba(0,0,0,.45); padding: .12em .6em; border-radius: 8px; width: fit-content; max-width: 100%; overflow-wrap: anywhere; transition: opacity .6s; }
+#chat-log b { color: var(--acc); }
+#chat-log div.old { opacity: 0; }
+#chat.open #chat-log div.old { opacity: 1; }
+#chat-input { pointer-events: auto; width: 100%; }
